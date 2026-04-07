@@ -5,13 +5,13 @@ import mongoose from 'mongoose';
 export const getProfile = async (req, res) => {
   // Use findOne with the correct query if req.user.id maps to _id or empId
   // Assuming req.user.id is the _id from the token
-  const employee = await Employee.findById(req.user.id);
+  const employee = await Employee.findById(req.user.id).lean();
   res.json(employee);
 };
 
 
 export const getTopTechnicians = async (req, res) => {
-  const techs = await Employee.find().sort({ earnings: -1 }).limit(10);
+  const techs = await Employee.find().sort({ earnings: -1 }).limit(10).lean();
   res.json(
     techs.map((t, i) => ({
       rank: i + 1,
@@ -42,7 +42,7 @@ export const getEmployeeSettings = async (req, res) => {
       query.empId = id;
     }
 
-    const employee = await Employee.findOne(query).select('settings');
+    const employee = await Employee.findOne(query).select('settings').lean();
 
     if (!employee) {
       return res.status(404).json({

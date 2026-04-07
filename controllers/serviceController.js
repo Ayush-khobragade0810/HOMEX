@@ -16,7 +16,8 @@ export const getEmployeeServices = async (req, res) => {
 
         const services = await Service.find(query)
             .sort({ scheduledDate: -1 })
-            .limit(parseInt(limit));
+            .limit(parseInt(limit))
+            .lean();
 
         res.json(services);
     } catch (err) {

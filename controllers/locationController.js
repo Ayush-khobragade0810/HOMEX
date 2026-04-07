@@ -150,7 +150,19 @@ export const getStates = async (req, res) => {
     }
 
     // Security: Use parameterized query (handled by Mongoose)
-    const states = await State.find({ country: country })
+    // First find the country by name
+    const countryDoc = await Country.findOne({ 
+      countryName: { $regex: new RegExp(`^${country}$`, 'i') } 
+    }).lean();
+
+    if (!countryDoc) {
+      return res.status(404).json({
+        success: false,
+        message: `Country not found: ${country}`
+      });
+    }
+
+    const states = await State.find({ countryId: countryDoc.countryId })
       .select('stateName -_id')
       .sort({ stateName: 1 })
       .lean();
@@ -223,11 +235,20 @@ export const getCities = async (req, res) => {
       });
     }
 
+    // Find state by name
+    const stateDoc = await State.findOne({ 
+      stateName: { $regex: new RegExp(`^${state}$`, 'i') } 
+    }).lean();
+
+    if (!stateDoc) {
+      return res.status(404).json({
+        success: false,
+        message: `State not found: ${state}`
+      });
+    }
+
     // Security: Use parameterized query
-    const cities = await City.find({ 
-      country: country, 
-      state: state 
-    })
+    const cities = await City.find({ stateId: stateDoc.stateId })
       .select('cityName -_id')
       .sort({ cityName: 1 })
       .lean();
@@ -303,41 +324,25 @@ export const getAreas = async (req, res) => {
 
     console.log(`🔍 [BACKEND] Searching areas for: ${country}, ${state}, ${city}`);
 
-    // Try multiple query approaches to handle different database structures
     let areas = [];
 
-    // Approach 1: Direct field matching (your current structure)
-    areas = await Area.find({ 
-      country: { $regex: new RegExp(`^${country}$`, 'i') }, 
-      state: { $regex: new RegExp(`^${state}$`, 'i') },
-      city: { $regex: new RegExp(`^${city}$`, 'i') } 
-    })
+    // Find city by name
+    const cityDoc = await City.findOne({ 
+      cityName: { $regex: new RegExp(`^${city}$`, 'i') } 
+    }).lean();
+
+    if (!cityDoc) {
+      return res.status(404).json({
+        success: false,
+        message: `City not found: ${city}`
+      });
+    }
+
+    // Approach 1: Use proper relational ID
+    areas = await Area.find({ cityId: cityDoc.cityId })
       .select('areaName -_id')
       .sort({ areaName: 1 })
       .lean();
-
-    // Approach 2: If no results, try case-insensitive search
-    if (!areas || areas.length === 0) {
-      areas = await Area.find({ 
-        country: { $regex: country, $options: 'i' }, 
-        state: { $regex: state, $options: 'i' },
-        city: { $regex: city, $options: 'i' } 
-      })
-        .select('areaName -_id')
-        .sort({ areaName: 1 })
-        .lean();
-    }
-
-    // Approach 3: If still no results, try with cityId structure
-    if ((!areas || areas.length === 0) && req.query.cityId) {
-      const cityId = parseInt(req.query.cityId);
-      if (!isNaN(cityId)) {
-        areas = await Area.find({ cityId: cityId })
-          .select('areaName -_id')
-          .sort({ areaName: 1 })
-          .lean();
-      }
-    }
 
     console.log(`🔍 [BACKEND] Found ${areas.length} areas for ${city}`);
 

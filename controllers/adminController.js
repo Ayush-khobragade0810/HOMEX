@@ -1,6 +1,4 @@
-import Booking from '../models/Booking.js';
-import User from '../models/User.js';
-import moment from 'moment';
+import { cache } from '../utils/helpers.js';
 
 /**
  * =============================
@@ -9,6 +7,14 @@ import moment from 'moment';
  */
 export const getDashboardStats = async (req, res) => {
   try {
+    const cacheKey = 'admin_dashboard_stats';
+    const cachedStats = cache.get(cacheKey);
+
+    if (cachedStats) {
+      console.log('🚀 Serving dashboard stats from cache');
+      return res.json({ success: true, ...cachedStats });
+    }
+
     const startOfDay = moment().startOf('day').toDate();
     const endOfDay = moment().endOf('day').toDate();
 
@@ -47,7 +53,7 @@ export const getDashboardStats = async (req, res) => {
       Booking.aggregate([
         { $match: { 'payment.status': 'paid' } },
         { $group: { _id: null, total: { $sum: '$payment.amount' } } }
-      ]),
+      ]).allowDiskUse(true),
       Booking.aggregate([
         {
           $match: {
@@ -56,28 +62,35 @@ export const getDashboardStats = async (req, res) => {
           }
         },
         { $group: { _id: null, total: { $sum: '$payment.amount' } } }
-      ])
+      ]).allowDiskUse(true)
     ]);
 
     const avgRatingAgg = await Booking.aggregate([
-      { $match: { 'rating.score': { $exists: true } } },
-      { $group: { _id: null, avg: { $avg: '$rating.score' } } }
-    ]);
+      { $match: { 'rating.stars': { $exists: true } } },
+      { $group: { _id: null, avg: { $avg: '$rating.stars' } } }
+    ]).allowDiskUse(true);
 
-    res.json({
-      success: true,
+    const stats = {
       totalUsers,
       totalBookings,
       totalEarnings: totalEarningsResult[0]?.total || 0,
       todaysEarnings: todaysEarningsResult[0]?.total || 0,
-      avgRating: avgRatingAgg[0]?.avg || 4.7,
+      avgRating: Number(avgRatingAgg[0]?.avg || 5).toFixed(1),
       pendingBookings,
       completedBookings,
       inProgressBookings,
       todaysBookings
+    };
+
+    // Cache results for 5 minutes
+    cache.set(cacheKey, stats, 5 * 60 * 1000);
+
+    res.json({
+      success: true,
+      ...stats
     });
   } catch (err) {
-    console.error(err);
+    console.error('Stats fetch error:', err);
     res.status(500).json({ success: false, error: 'Stats fetch failed' });
   }
 };
@@ -247,6 +260,13 @@ export const getAllUsers = async (req, res) => {
  */
 export const getUserStats = async (req, res) => {
   try {
+    const cacheKey = 'admin_user_stats';
+    const cachedStats = cache.get(cacheKey);
+
+    if (cachedStats) {
+      return res.json({ success: true, stats: cachedStats });
+    }
+
     const totalFilter = { isDeleted: { $ne: true } };
 
     // Robust case-insensitive counts
@@ -261,10 +281,10 @@ export const getUserStats = async (req, res) => {
       role: /^user$/i
     });
 
-    // Active users (Robust check: has isActive field OR isActive is missing)
+    // Active users
     const activeUsers = await User.countDocuments({
       ...totalFilter,
-      role: /^user$/i, // FIX: Ensure we only count regular users
+      role: /^user$/i,
       $or: [
         { isActive: true },
         { isActive: { $exists: false } }
@@ -275,15 +295,19 @@ export const getUserStats = async (req, res) => {
     const totalBookings = await Booking.countDocuments(totalFilter);
     const avgBookings = totalUsers > 0 ? (totalBookings / totalUsers) : 0;
 
+    const stats = {
+      totalUsers,
+      totalEmployees,
+      newUsers,
+      activeUsers,
+      avgBookings
+    };
+
+    cache.set(cacheKey, stats, 5 * 60 * 1000);
+
     res.json({
       success: true,
-      stats: {
-        totalUsers,
-        totalEmployees,
-        newUsers,
-        activeUsers,
-        avgBookings
-      }
+      stats
     });
   } catch (error) {
     console.error('User Stats Error:', error);

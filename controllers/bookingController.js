@@ -1,6 +1,11 @@
 import mongoose from 'mongoose';
 import Booking from '../models/Booking.js';
 import User from '../models/User.js';
+import Country from '../models/Country.js';
+import State from '../models/State.js';
+import City from '../models/City.js';
+import Area from '../models/Area.js';
+
 import {
   sendNotification,
   emitBookingUpdate,
@@ -48,6 +53,37 @@ const calculateDurationFromTimeSlot = (timeSlot) => {
   return diff > 0 ? diff : null;
 };
 
+const resolveLocations = async (countryName, stateName, cityName, areaName) => {
+  let countryId = null, stateId = null, cityId = null, areaId = null;
+
+  if (countryName) {
+    let country = await Country.findOne({ countryName: { $regex: new RegExp(`^${countryName}$`, 'i') } });
+    if (!country) country = await Country.create({ countryName });
+    countryId = country.countryId;
+
+    if (stateName) {
+      let state = await State.findOne({ stateName: { $regex: new RegExp(`^${stateName}$`, 'i') }, countryId });
+      if (!state) state = await State.create({ stateName, countryId });
+      stateId = state.stateId;
+
+      if (cityName) {
+        let city = await City.findOne({ cityName: { $regex: new RegExp(`^${cityName}$`, 'i') }, stateId });
+        if (!city) city = await City.create({ cityName, stateId });
+        cityId = city.cityId;
+
+        if (areaName) {
+          let area = await Area.findOne({ areaName: { $regex: new RegExp(`^${areaName}$`, 'i') }, cityId });
+          if (!area) area = await Area.create({ areaName, cityId });
+          areaId = area.areaId;
+        }
+      }
+    }
+  }
+
+  return { countryId, stateId, cityId, areaId };
+};
+
+
 // @desc    Create new booking
 // @route   POST /api/bookings
 // @access  Private
@@ -90,11 +126,27 @@ export const createBooking = async (req, res) => {
     }
     const durationFromTimeSlot = calculateDurationFromTimeSlot(schedule.timeSlot);
 
+    // Resolve location IDs dynamically
+    console.log('🌍 [2C] Resolving location IDs...');
+    const resolvedIds = await resolveLocations(
+      location.country,
+      location.state,
+      location.city,
+      location.area
+    );
+
+    const actualUserId = req.user.userId || req.user._id || req.user.id;
+
+    if (!actualUserId) {
+      console.error('🚨 CRITICAL ERROR: actualUserId evaluate to undefined! req.user payload:', req.user);
+      throw new Error('User ID could not be determined from authentication payload.');
+    }
+
     console.log('💾 [3] Creating booking object...');
 
     // Create booking object
     const bookingData = {
-      userId: req.user._id,
+      userId: actualUserId,
       serviceId: serviceId, // can be null/undefined for custom
       serviceDetails: {
         ...serviceDetails,
@@ -106,7 +158,13 @@ export const createBooking = async (req, res) => {
         timeSlot: schedule.timeSlot,
         originalDate: new Date(schedule.preferredDate)
       },
-      location,
+      location: {
+        ...location,
+        countryId: resolvedIds.countryId,
+        stateId: resolvedIds.stateId,
+        cityId: resolvedIds.cityId,
+        areaId: resolvedIds.areaId
+      },
       // Persist customer contact in schema-compatible field
       contactIdInfo: contactInfo || {
         fullName: req.user.name,
@@ -129,18 +187,26 @@ export const createBooking = async (req, res) => {
 
     console.log('📝 [3A] Booking data prepared. Saving...');
 
-    // CRITICAL: Add timeout to database operation
-    // Removing transaction for now to avoid locks causing hangs
-    const bookingPromise = Booking.create(bookingData);
+    let booking;
+    try {
+      // Race between booking creation and timeout
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Database operation timeout after 5s')), 5000);
+      });
 
-    // Race between booking creation and timeout
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('Database operation timeout after 5s')), 5000);
-    });
-
-    console.log('⏱️ [3B] Starting database operation with 5s timeout...');
-
-    const booking = await Promise.race([bookingPromise, timeoutPromise]);
+      // Execute only once to avoid unhandled rejections or ghost creates
+      const bookingPromise = Booking.create(bookingData);
+      booking = await Promise.race([bookingPromise, timeoutPromise]);
+    } catch (creationError) {
+      console.error('🚨 Mongoose creation failed:', creationError.message);
+      return res.status(400).json({
+        success: false,
+        message: 'Debug Intercept: ' + creationError.message,
+        actualUserId: typeof actualUserId === 'undefined' ? 'UNDEFINED' : actualUserId,
+        bookingDataKeys: Object.keys(bookingData),
+        userIdInBookingData: typeof bookingData.userId === 'undefined' ? 'UNDEFINED' : bookingData.userId
+      });
+    }
 
     console.log('✅ [3] Booking created successfully:', booking._id);
 
@@ -152,7 +218,7 @@ export const createBooking = async (req, res) => {
     console.log('📤 [4] Sending response...');
 
     // Send notification (async, don't await blocking response)
-    sendNotification(req.user._id, {
+    sendNotification(actualUserId, {
       title: 'Booking Confirmed',
       message: `Your booking for ${serviceDetails.title} has been received.`,
       type: 'BOOKING_CONFIRMED',
@@ -190,7 +256,7 @@ export const createBooking = async (req, res) => {
     console.error('Error message:', error.message);
 
     logger.errorWithContext(
-      { userId: req.user._id },
+      { userId: req.user.userId || req.user._id || req.user.id },
       'Create booking error',
       error
     );
@@ -219,7 +285,8 @@ export const getBooking = async (req, res) => {
     const booking = await Booking.findById(req.params.id)
       .populate('userId', 'name email phone avatar')
       .populate('assignedTo.technicianId', 'name phone avatar rating')
-      .populate('serviceId');
+      .populate('serviceId')
+      .lean();
 
     if (!booking) {
       return res.status(404).json({
@@ -229,7 +296,8 @@ export const getBooking = async (req, res) => {
     }
 
     // Authorization check
-    if (booking.userId._id.toString() !== req.user._id.toString() &&
+    const requestUserId = (req.user.userId || req.user._id || req.user.id).toString();
+    if (booking.userId._id.toString() !== requestUserId &&
       req.user.role !== 'admin' &&
       req.user.role !== 'technician') { // Add technician check logically later if needed
       return res.status(403).json({
@@ -271,7 +339,8 @@ export const cancelBooking = async (req, res) => {
     }
 
     // Authorization
-    if (booking.userId.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+    const requestUserId = (req.user.userId || req.user._id || req.user.id).toString();
+    if (booking.userId.toString() !== requestUserId && req.user.role !== 'admin') {
       return res.status(403).json({
         success: false,
         message: 'Not authorized to cancel this booking'
@@ -318,7 +387,7 @@ export const cancelBooking = async (req, res) => {
 
   } catch (error) {
     logger.errorWithContext(
-      { bookingId: req.params.id, userId: req.user._id },
+      { bookingId: req.params.id, userId: req.user.userId || req.user._id || req.user.id },
       'Cancel booking error',
       error
     );
@@ -344,7 +413,8 @@ export const rescheduleBooking = async (req, res) => {
       });
     }
 
-    if (booking.userId.toString() !== req.user._id.toString()) {
+    const requestUserId = (req.user.userId || req.user._id || req.user.id).toString();
+    if (booking.userId.toString() !== requestUserId) {
       return res.status(403).json({
         success: false,
         message: 'Not authorized'
@@ -394,7 +464,7 @@ export const rescheduleBooking = async (req, res) => {
 
   } catch (error) {
     logger.errorWithContext(
-      { bookingId: req.params.id, userId: req.user._id },
+      { bookingId: req.params.id, userId: req.user.userId || req.user._id || req.user.id },
       'Reschedule booking error',
       error
     );
@@ -455,7 +525,7 @@ export const rateBooking = async (req, res) => {
 
   } catch (error) {
     logger.errorWithContext(
-      { bookingId: req.params.id, userId: req.user._id },
+      { bookingId: req.params.id, userId: req.user.userId || req.user._id || req.user.id },
       'Rate booking error',
       error
     );
@@ -509,7 +579,7 @@ export const getAvailableSlots = async (req, res) => {
     const bookings = await Booking.find({
       'schedule.preferredDate': { $gte: startOfDay, $lte: endOfDay },
       status: { $in: ['confirmed', 'assigned', 'in_progress'] }
-    });
+    }).lean();
 
     const bookedCounts = {};
     bookings.forEach(b => {

@@ -373,7 +373,8 @@ export const getUserBookings = async (req, res) => {
         const bookings = await Booking.find({ userId: req.params.userId })
             .populate("assignedTo.technicianId", "name email")
             .populate("serviceId", "name category")
-            .sort({ createdAt: -1 });
+            .sort({ createdAt: -1 })
+            .lean();
 
         res.json({ success: true, bookings });
     } catch (error) {

@@ -1,0 +1,26 @@
+﻿--- TESTING EXTERNAL IMPORTS ---
+Γ£à express: LOADED
+Γ£à dotenv: LOADED
+Γ£à cors: LOADED
+Γ£à mongoose: LOADED
+Γ£à socket.io: LOADED
+Γ£à helmet: LOADED
+Γ£à express-mongo-sanitize: LOADED
+Γ£à xss-clean: LOADED
+Γ£à hpp: LOADED
+Γ£à express-rate-limit: LOADED
+Γ£à cookie-parser: LOADED
+Γ£à csurf: LOADED
+Γ£à moment: LOADED
+
+--- TESTING INTERNAL IMPORTS (relative to server.js) ---
+Γ£à ./utils/logger.js: LOADED
+Γ£à ./socket/socketService.js: LOADED
+Γ£à ./routes/auth.routes.js: LOADED
+Γ£à ./routes/user.routes.js: LOADED
+Γ£à ./routes/booking.js: LOADED
+Γ£à ./routes/admin/bookings.js: LOADED
+Γ£à ./routes/adminRoutes.js: LOADED
+Γ£à ./routes/adminEmployeeRoutes.js: LOADED
+Γ£à ./routes/serviceRoutes.js: LOADED
+Γ£à ./routes/serviceActionRoutes.js: LOADED

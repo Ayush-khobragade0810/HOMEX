@@ -14,6 +14,7 @@ import mongoSanitize from 'express-mongo-sanitize';
 import xss from 'xss-clean';
 import hpp from 'hpp';
 import rateLimit from 'express-rate-limit';
+import compression from 'compression';
 import cookieParser from 'cookie-parser';
 import csrf from 'csurf';
 import path from 'path';
@@ -44,18 +45,19 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+app.use(compression());
 const httpServer = createServer(app);
 
 // CORS - Must be first to ensure headers are present even if other middleware fails
 app.use(cors({
-  origin: ["http://localhost:5173", "http://localhost:3000"], // Match socket cors
+  origin: ["http://localhost:5173", "http://localhost:3000", "https://homex.net.in"], // Match socket cors
   credentials: true
 }));
 
 // Initialize Socket.IO
 const io = new Server(httpServer, {
   cors: {
-    origin: ["http://localhost:5173", "http://localhost:3000"], // Add your client URLs
+    origin: ["http://localhost:5173", "http://localhost:3000", "https://homex.net.in"], // Add your client URLs
     methods: ["GET", "POST", "PUT", "DELETE"],
     credentials: true,
     allowedHeaders: ["Authorization"]

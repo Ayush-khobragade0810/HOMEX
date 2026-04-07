@@ -50,7 +50,8 @@ export const getUserProfile = async (req, res) => {
         }
 
         const user = await User.findById(userId)
-            .select('-password -__v -refreshTokens');
+            .select('-password -__v -refreshTokens')
+            .lean();
 
         if (!user) {
             return res.status(404).json({
@@ -61,7 +62,7 @@ export const getUserProfile = async (req, res) => {
 
         // Add online status
         const userWithStatus = {
-            ...user.toObject(),
+            ...user,
             isOnline: isUserOnline(userId)
         };
 
@@ -225,7 +226,8 @@ export const getUserBookings = async (req, res) => {
             .populate('assignedTo.technicianId', 'name phone avatar rating')
             .sort({ 'schedule.preferredDate': 1, createdAt: -1 })
             .skip(skip)
-            .limit(parseInt(limit));
+            .limit(parseInt(limit))
+            .lean();
 
         const total = await Booking.countDocuments(query);
 
@@ -465,7 +467,8 @@ export const getNotifications = async (req, res) => {
         const notifications = await Notification.find(query)
             .sort({ createdAt: -1 })
             .skip(skip)
-            .limit(parseInt(limit));
+            .limit(parseInt(limit))
+            .lean();
 
         const unreadCount = await Notification.countDocuments({
             userId: new mongoose.Types.ObjectId(userId),

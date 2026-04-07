@@ -148,7 +148,7 @@ export const getSchedules = async (req, res) => {
 
         // --- EXECUTE ---
         const [bookings, services] = await Promise.all([
-            Booking.find(bookingQuery).populate('userId', 'name phone address location'),
+            Booking.find(bookingQuery).populate('userId', 'name phone address location').lean(),
             numericEmpId ? Service.find(serviceQuery).lean() : Promise.resolve([])
         ]);
 

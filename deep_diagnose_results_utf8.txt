@@ -1,0 +1,8 @@
+﻿--- STARTING DEEP IMPORT ANALYSIS ---
+[PACKAGE MISSING]: e:\QuadSyncTechonology\HomaxMain2\HomaxMain\Homax\Backend\debugServer_test.js imports "child_process" -> child_process NOT in node_modules
+[PACKAGE MISSING]: e:\QuadSyncTechonology\HomaxMain2\HomaxMain\Homax\Backend\diagnose_imports.js imports "module" -> module NOT in node_modules
+[FILE NOT FOUND]: e:\QuadSyncTechonology\HomaxMain2\HomaxMain\Homax\Backend\middleware\employeeAuth.js imports "../models/Employee.js" -> NOT FOUND
+[FILE NOT FOUND]: e:\QuadSyncTechonology\HomaxMain2\HomaxMain\Homax\Backend\routes\serviceActionRoutes.js imports "../middleware/auth.js" -> NOT FOUND
+[PACKAGE MISSING]: e:\QuadSyncTechonology\HomaxMain2\HomaxMain\Homax\Backend\services\adminService.js imports "axios" -> axios NOT in node_modules
+[PACKAGE MISSING]: e:\QuadSyncTechonology\HomaxMain2\HomaxMain\Homax\Backend\services\exportService.js imports "pdfkit" -> pdfkit NOT in node_modules
+--- ANALYSIS COMPLETE ---
