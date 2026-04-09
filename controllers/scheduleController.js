@@ -144,6 +144,9 @@ export const getSchedules = async (req, res) => {
             } else {
                 bookingQuery['schedule.preferredDate'] = { $gte: period.start, $lte: period.end };
             }
+            
+            // Apply period to Legacy Service Query too! (Root cause of slowness)
+            serviceQuery.scheduledDate = { $gte: period.start, $lte: period.end };
         }
 
         // --- EXECUTE ---
@@ -153,8 +156,7 @@ export const getSchedules = async (req, res) => {
         ]);
 
         // --- MAP & MERGE ---
-        let mappedBookings = bookings.map(b => {
-            const booking = b.toObject();
+        let mappedBookings = bookings.map(booking => {
             return {
                 _id: booking._id,
                 serviceId: booking.bookingId,

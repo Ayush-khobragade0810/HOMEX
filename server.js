@@ -211,16 +211,6 @@ app.use('/api/cities', cityRoutes);
 app.use('/api/areas', areaRoutes);
 app.use('/api/debug', debugRoutes);
  
-// Catch-all for undefined /api routes to help debug 404s
-app.use('/api/*', (req, res) => {
-  console.warn(`⚠️  [404 NOT FOUND] ${req.method} ${req.originalUrl}`);
-  res.status(404).json({
-    success: false,
-    message: `API Route not found: ${req.originalUrl}`,
-    hint: 'Check if the prefix /api is being correctly handled by your proxy.'
-  });
-});
-
 // Health Check
 app.get('/api/health', (req, res) => {
   res.status(200).json({
@@ -234,6 +224,16 @@ app.get('/api/ws-health', (req, res) => {
   res.status(200).json({
     status: 'ok',
     connections: socketService.getConnectionCount()
+  });
+});
+
+// Catch-all for undefined /api routes to help debug 404s
+app.use('/api/*', (req, res) => {
+  console.warn(`⚠️  [404 NOT FOUND] ${req.method} ${req.originalUrl}`);
+  res.status(404).json({
+    success: false,
+    message: `API Route not found: ${req.originalUrl}`,
+    hint: 'Check if the prefix /api is being correctly handled by your proxy.'
   });
 });
 
