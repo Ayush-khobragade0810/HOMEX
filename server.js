@@ -129,9 +129,15 @@ const csrfProtection = csrf({ cookie: true });
 // so CSRF attacks are not possible here. Enforcing CSRF would only break
 // legitimate PUT/PATCH calls from this app's own frontend.
 
-// CSRF Token Endpoint - kept for any legacy client that needs it
+// CSRF Token Endpoint - kept for frontend compatibility
 app.get('/api/csrf-token', csrfProtection, (req, res) => {
-  res.json({ csrfToken: req.csrfToken() });
+  try {
+    const token = req.csrfToken();
+    res.json({ csrfToken: token });
+  } catch (err) {
+    logger.error('CSRF Token generation failed:', err);
+    res.status(500).json({ success: false, message: 'Failed to generate CSRF token' });
+  }
 });
 
 
