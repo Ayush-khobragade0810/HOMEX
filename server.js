@@ -185,7 +185,9 @@ app.use((req, res, next) => {
 // I will check or create simple route files if they are not part of the explicit context but users usually have them.
 // For now, let's assume standard route mounting.
 
+// Auth Routes - Mounted at both prefixes for resilience against proxy stripping
 app.use('/api/auth', authRoutes);
+app.use('/auth', authRoutes); // Fallback for stripped prefix
 import testRoutes from './routes/test.js';
 app.use('/api/test', testRoutes);
 
@@ -208,6 +210,16 @@ app.use('/api/states', stateRoutes);
 app.use('/api/cities', cityRoutes);
 app.use('/api/areas', areaRoutes);
 app.use('/api/debug', debugRoutes);
+ 
+// Catch-all for undefined /api routes to help debug 404s
+app.use('/api/*', (req, res) => {
+  console.warn(`⚠️  [404 NOT FOUND] ${req.method} ${req.originalUrl}`);
+  res.status(404).json({
+    success: false,
+    message: `API Route not found: ${req.originalUrl}`,
+    hint: 'Check if the prefix /api is being correctly handled by your proxy.'
+  });
+});
 
 // Health Check
 app.get('/api/health', (req, res) => {
