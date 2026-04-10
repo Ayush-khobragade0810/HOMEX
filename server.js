@@ -130,7 +130,7 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(xss());
+// app.use(xss());
 // app.use(hpp()); // <-- Disabled as requested to prevent query parameter conflicts
 
 // Cookie and Body Parsing
