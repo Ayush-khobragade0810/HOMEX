@@ -29,7 +29,7 @@ import socketService from './socket/socketService.js';
 // Import routes
 import authRoutes from './routes/auth.routes.js';
 import userRoutes from './routes/user.routes.js';
-import bookingRoutes from './routes/booking.js'; 
+import bookingRoutes from './routes/booking.js';
 import adminBookingRoutes from './routes/admin/bookings.js';
 import adminRoutes from './routes/adminRoutes.js';
 import adminEmployeeRoutes from './routes/adminEmployeeRoutes.js';
@@ -54,8 +54,8 @@ const app = express();
 const httpServer = createServer(app);
 
 // CORS Configuration
-const allowedOrigins = process.env.ALLOWED_ORIGINS 
-  ? process.env.ALLOWED_ORIGINS.split(',').map(base => base.replace(/^["']|["']$/g, '').trim()) 
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',').map(base => base.replace(/^["']|["']$/g, '').trim())
   : ["http://localhost:5173", "http://localhost:3000", "https://homex.net.in"];
 
 // Initialize Socket.IO
@@ -92,7 +92,7 @@ app.use(compression());
 app.use(cors({
   origin: (origin, callback) => {
     if (!origin) return callback(null, true);
-    
+
     const isRenderDomain = origin.endsWith('.onrender.com');
     const isWhitelisted = allowedOrigins.indexOf(origin) !== -1 || allowedOrigins.includes('*');
 
@@ -139,12 +139,14 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 // Custom MongoDB Sanitizer (Body and Params only)
-app.use((req, res, next) => {
-  if (req.body) mongoSanitize.sanitize(req.body);
-  if (req.params) mongoSanitize.sanitize(req.params);
-  // DO NOT touch req.query
-  next();
-});
+// app.use((req, res, next) => {
+//   if (req.body) mongoSanitize.sanitize(req.body);
+//   if (req.params) mongoSanitize.sanitize(req.params);
+//   // DO NOT touch req.query
+//   next();
+// });
+
+app.use(mongoSanitize());
 
 // CSRF Utility Setup
 const csrfProtection = csrf({ cookie: true });
@@ -155,8 +157,8 @@ app.use(logger.requestLogger);
 
 // Rate Limiting
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, 
-  max: 300, 
+  windowMs: 15 * 60 * 1000,
+  max: 300,
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -181,7 +183,7 @@ app.get('/api/csrf-token', csrfProtection, (req, res) => {
 });
 
 app.use('/api/auth', authRoutes);
-app.use('/auth', authRoutes); 
+app.use('/auth', authRoutes);
 app.use('/api/test', testRoutes);
 app.use('/api/user', userRoutes);
 app.use('/api/my-bookings', userRoutes);
