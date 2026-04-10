@@ -146,7 +146,12 @@ app.use(express.urlencoded({ extended: true }));
 //   next();
 // });
 
-app.use(mongoSanitize());
+// app.use(mongoSanitize());
+
+app.use(mongoSanitize({
+  allowDots: true,
+  replaceWith: '_',
+}));
 
 // CSRF Utility Setup
 const csrfProtection = csrf({ cookie: true });
