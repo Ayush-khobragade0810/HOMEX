@@ -130,12 +130,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// Data Sanitization
-app.use((req, res, next) => {
-  if (req.body) mongoSanitize.sanitize(req.body);
-  if (req.params) mongoSanitize.sanitize(req.params);
-  next();
-});
 app.use(xss());
 app.use(hpp());
 
@@ -143,6 +137,22 @@ app.use(hpp());
 app.use(cookieParser());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true }));
+
+// Custom MongoDB Sanitizer (Body and Params only)
+app.use((req, res, next) => {
+  try {
+    if (req.body) {
+      req.body = mongoSanitize.sanitize(req.body);
+    }
+    if (req.params) {
+      req.params = mongoSanitize.sanitize(req.params);
+    }
+    // IMPORTANT: do NOT touch req.query
+    next();
+  } catch (err) {
+    next(err);
+  }
+});
 
 // CSRF Utility Setup
 const csrfProtection = csrf({ cookie: true });
