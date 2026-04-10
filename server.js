@@ -45,6 +45,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+app.set('trust proxy', 1);
 app.use(compression());
 const httpServer = createServer(app);
 
@@ -58,7 +59,10 @@ app.use(cors({
     // Allow requests with no origin (like mobile apps or curl)
     if (!origin) return callback(null, true);
     
-    if (allowedOrigins.indexOf(origin) !== -1 || allowedOrigins.includes('*')) {
+    const isRenderDomain = origin.endsWith('.onrender.com');
+    const isWhitelisted = allowedOrigins.indexOf(origin) !== -1 || allowedOrigins.includes('*');
+
+    if (isWhitelisted || isRenderDomain) {
       callback(null, true);
     } else {
       console.warn(`🚦 [CORS REJECTED]: ${origin}`);
