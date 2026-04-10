@@ -126,7 +126,11 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(mongoSanitize());
+app.use((req, res, next) => {
+  if (req.body) mongoSanitize.sanitize(req.body);
+  if (req.params) mongoSanitize.sanitize(req.params);
+  next();
+});
 app.use(xss());
 app.use(hpp());
 app.use(cookieParser());
