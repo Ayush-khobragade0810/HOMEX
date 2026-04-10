@@ -27,7 +27,7 @@ import socketService from './socket/socketService.js';
 // Import routes
 import authRoutes from './routes/auth.routes.js';
 import userRoutes from './routes/user.routes.js';
-import bookingRoutes from './routes/booking.js'; // Using booking.js as filename per file view
+import bookingRoutes from './routes/booking.js'; 
 import adminBookingRoutes from './routes/admin/bookings.js';
 import adminRoutes from './routes/adminRoutes.js';
 import adminEmployeeRoutes from './routes/adminEmployeeRoutes.js';
@@ -38,6 +38,10 @@ import stateRoutes from './routes/stateRoutes.js';
 import cityRoutes from './routes/cityRoute.js';
 import areaRoutes from './routes/areaRoute.js';
 import debugRoutes from './routes/debug.js';
+import testRoutes from './routes/test.js';
+import notificationRoutes from './routes/notificationRoutes.js';
+import scheduleRoutes from './routes/scheduleRoutes.js';
+import paymentRoutes from './routes/paymentRoutes.js';
 
 dotenv.config();
 
@@ -94,12 +98,8 @@ mongoose.connect(process.env.MONGO_URI, {
 })
   .then(() => logger.info('MongoDB Connected'))
   .catch((err) => {
-    logger.error('MongoDB connection error:', {
-      message: err.message,
-      code: err.code,
-      name: err.name
-    });
-    // process.exit(1); // Removing immediate exit to allow server to potentially handle logic or debug
+    logger.error('MongoDB connection failed', err);
+    process.exit(1);
   });
 
 // Security Middleware
@@ -206,7 +206,6 @@ app.use((req, res, next) => {
 // Auth Routes - Mounted at both prefixes for resilience against proxy stripping
 app.use('/api/auth', authRoutes);
 app.use('/auth', authRoutes); // Fallback for stripped prefix
-import testRoutes from './routes/test.js';
 app.use('/api/test', testRoutes);
 
 app.use('/api/user', userRoutes); // Changed to singular to match /api/user/profile/:id
@@ -217,11 +216,8 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/employees', adminEmployeeRoutes);
 app.use('/api/services', serviceRoutes);
 app.use('/api/service-actions', serviceActionRoutes);
-import notificationRoutes from './routes/notificationRoutes.js';
 app.use('/api/notifications', notificationRoutes);
-import scheduleRoutes from './routes/scheduleRoutes.js';
 app.use('/api/schedule', scheduleRoutes);
-import paymentRoutes from './routes/paymentRoutes.js';
 app.use('/api/payments', paymentRoutes);
 app.use('/api/countries', countryRoutes);
 app.use('/api/states', stateRoutes);
@@ -290,7 +286,7 @@ const PORT = process.env.PORT || 5000;
 
 const serverListener = httpServer.listen(PORT, '0.0.0.0', () => {
   logger.info(`🚀 Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
-  console.log(`✅ Backend ready at http://localhost:${PORT}`);
+  console.log(`Backend ready on port ${PORT}`);
 
   // ✅ PRINT REGISTERED ROUTES (For Debugging)
   const printRoutes = () => {
