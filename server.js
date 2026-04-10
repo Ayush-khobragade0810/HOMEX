@@ -290,31 +290,38 @@ const serverListener = httpServer.listen(PORT, '0.0.0.0', () => {
 
   // ✅ PRINT REGISTERED ROUTES (For Debugging)
   const printRoutes = () => {
-    console.log('\n📋 REGISTERED ROUTES:');
-    console.log('====================');
-
-    app._router.stack.forEach((middleware) => {
-      if (middleware.route) {
-        // Routes registered directly on app
-        const methods = Object.keys(middleware.route.methods).join(', ').toUpperCase();
-        console.log(`${methods.padEnd(7)} ${middleware.route.path}`);
-      } else if (middleware.name === 'router') {
-        // Router middleware
-        const prefix = middleware.regexp.toString()
-          .replace('/^\\', '')
-          .replace('\\/?(?=\\/|$)/i', '')
-          .replace('\\/', '/');
-
-        middleware.handle.stack.forEach((handler) => {
-          if (handler.route) {
-            const route = handler.route;
-            const methods = Object.keys(route.methods).join(', ').toUpperCase();
-            console.log(`${methods.padEnd(7)} ${prefix}${route.path}`);
-          }
-        });
+    try {
+      if (!app._router || !app._router.stack) {
+        console.log('📋 No routes registered or router stack not available yet.');
+        return;
       }
-    });
-    console.log('====================\n');
+
+      console.log('\n📋 REGISTERED ROUTES:');
+      console.log('====================');
+
+      app._router.stack.forEach((middleware) => {
+        if (middleware.route) {
+          const methods = Object.keys(middleware.route.methods).join(', ').toUpperCase();
+          console.log(`${methods.padEnd(7)} ${middleware.route.path}`);
+        } else if (middleware.name === 'router' && middleware.handle && middleware.handle.stack) {
+          const prefix = middleware.regexp.toString()
+            .replace('/^\\', '')
+            .replace('\\/?(?=\\/|$)/i', '')
+            .replace('\\/', '/');
+
+          middleware.handle.stack.forEach((handler) => {
+            if (handler.route) {
+              const route = handler.route;
+              const methods = Object.keys(route.methods).join(', ').toUpperCase();
+              console.log(`${methods.padEnd(7)} ${prefix}${route.path}`);
+            }
+          });
+        }
+      });
+      console.log('====================\n');
+    } catch (err) {
+      console.warn('⚠️ Could not print registered routes:', err.message);
+    }
   };
 
   printRoutes();
