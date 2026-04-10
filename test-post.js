@@ -8,12 +8,12 @@ async function test() {
   await mongoose.connect(MONGO_URI);
   const db = mongoose.connection.db;
   const user = await db.collection('users').findOne({});
-  
+
   if (!user) {
     console.log("No users found in database");
     process.exit(1);
   }
-  
+
   const token = jwt.sign({ id: user._id.toString(), role: user.role || 'user' }, JWT_SECRET, { expiresIn: '1h' });
   console.log("Found user, sending request with token:", token);
 
@@ -25,7 +25,7 @@ async function test() {
     contactInfo: { fullName: 'Test Name', phoneNumber: '1234567890' }
   };
 
-  const r = await fetch('http://localhost:5000/api/bookings', {
+  const r = await fetch('https://homex-1.onrender.com/api/bookings', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -33,7 +33,7 @@ async function test() {
     },
     body: JSON.stringify(payload)
   });
-  
+
   const data = await r.json();
   console.log(JSON.stringify({ status: r.status, data }, null, 2));
   process.exit(0);
