@@ -1,11 +1,20 @@
 import express from "express";
 import State from "../models/State.js";
 
+import { cache } from "../utils/helpers.js";
+
 const router = express.Router();
 
 // GET all states with country details
 router.get("/", async (req, res) => {
     try {
+        const cacheKey = 'master_states';
+        const cachedData = cache.get(cacheKey);
+        
+        if (cachedData) {
+            return res.json(cachedData);
+        }
+
         const states = await State.aggregate([
             {
                 $lookup: {
@@ -37,9 +46,12 @@ router.get("/", async (req, res) => {
             countryId: state.countryId
         }));
 
+        // Cache for 10 minutes
+        cache.set(cacheKey, transformedStates, 600000);
+
         res.json(transformedStates);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: "Failed to load states" });
     }
 });
 

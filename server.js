@@ -284,8 +284,9 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 5000;
 
-httpServer.listen(PORT, () => {
-  logger.info(`Server running in ${process.env.NODE_ENV || 'development'} mode on port ${PORT}`);
+const serverListener = httpServer.listen(PORT, '0.0.0.0', () => {
+  logger.info(`🚀 Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
+  console.log(`✅ Backend ready at http://localhost:${PORT}`);
 
   // ✅ PRINT REGISTERED ROUTES (For Debugging)
   const printRoutes = () => {
@@ -318,6 +319,11 @@ httpServer.listen(PORT, () => {
 
   printRoutes();
 });
+
+// Increase timeouts to prevent premature 502/504 Bad Gateway errors on slow queries
+serverListener.timeout = 120000; // 2 minutes
+serverListener.keepAliveTimeout = 65000;
+serverListener.headersTimeout = 61000;
 
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (err) => {

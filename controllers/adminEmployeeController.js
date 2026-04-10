@@ -1,3 +1,6 @@
+import mongoose from "mongoose";
+import Employee from "../models/adminEmployee.js";
+import Booking from "../models/Booking.js";
 import { cache } from "../utils/helpers.js";
 
 /**
@@ -36,7 +39,6 @@ export const searchEmployees = async (req, res) => {
 
         // Run aggregations in parallel to avoid sequential blocking
         const [earningsStats, currentTaskStats] = await Promise.all([
-            // 1. Efficiently aggregate earnings per employee
             Booking.aggregate([
                 { 
                     $match: { 
@@ -54,7 +56,7 @@ export const searchEmployees = async (req, res) => {
                         } 
                     } 
                 }
-            ]).hint({ "assignedTo.technicianId": 1, status: 1 }), // Use the new index
+            ]),
 
             // 2. Efficiently find the latest active task per employee
             Booking.aggregate([
@@ -71,7 +73,7 @@ export const searchEmployees = async (req, res) => {
                         latestTask: { $first: "$$ROOT" } 
                     } 
                 }
-            ]).hint({ "assignedTo.technicianId": 1, status: 1 }) // Use the new index
+            ])
         ]);
 
         // Create fast lookup maps
@@ -124,7 +126,11 @@ export const searchEmployees = async (req, res) => {
 
         res.json(formattedEmployees);
     } catch (err) {
-        console.error("🔴 Error in searchEmployees:", err);
+        console.error("❌ EMPLOYEE API ERROR (searchEmployees):", {
+            message: err.message,
+            stack: err.stack,
+            query: req.query
+        });
         res.status(500).json({ 
             success: false, 
             message: "Failed to load employee list",

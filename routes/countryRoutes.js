@@ -1,12 +1,21 @@
 import express from "express";
 import Country from "../models/Country.js";
 
+import { cache } from "../utils/helpers.js";
+
 const router = express.Router();
 
 // GET all countries
 router.get("/", async (req, res) => {
     try {
-        const countries = await Country.find().sort({ countryId: 1 });
+        const cacheKey = 'master_countries';
+        const cachedData = cache.get(cacheKey);
+        
+        if (cachedData) {
+            return res.json(cachedData);
+        }
+
+        const countries = await Country.find().sort({ countryId: 1 }).lean();
         
         // Transform data to match frontend expectations
         const transformedCountries = countries.map(country => ({
@@ -14,9 +23,12 @@ router.get("/", async (req, res) => {
             name: country.countryName
         }));
         
+        // Cache for 10 minutes
+        cache.set(cacheKey, transformedCountries, 600000);
+        
         res.json(transformedCountries);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: "Failed to load countries" });
     }
 });
 

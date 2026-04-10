@@ -122,7 +122,10 @@ export const getDashboardStats = async (req, res) => {
       ...stats
     });
   } catch (err) {
-    console.error('🔴 CRITICAL: getDashboardStats failed:', err);
+    console.error('❌ ADMIN STATS ERROR (getDashboardStats):', {
+      message: err.message,
+      stack: err.stack
+    });
     res.status(500).json({ 
       success: false, 
       message: 'Failed to fetch dashboard statistics',
@@ -289,7 +292,11 @@ export const getAllUsers = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Get Users Error:', error);
+    console.error('❌ GET USERS ERROR (getAllUsers):', {
+      message: error.message,
+      stack: error.stack,
+      query: req.query
+    });
     res.status(500).json({ 
       success: false, 
       message: 'Failed to fetch users',
@@ -349,7 +356,10 @@ export const getUserStats = async (req, res) => {
       stats
     });
   } catch (error) {
-    console.error('User Stats Error:', error);
+    console.error('❌ USER STATS ERROR (getUserStats):', {
+      message: error.message,
+      stack: error.stack
+    });
     res.status(500).json({ 
       success: false, 
       message: 'Failed to fetch user stats',

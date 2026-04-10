@@ -1,11 +1,20 @@
 import express from "express";
 import City from "../models/City.js";
 
+import { cache } from "../utils/helpers.js";
+
 const router = express.Router();
 
 // GET all cities with state and country details
 router.get("/", async (req, res) => {
     try {
+        const cacheKey = 'master_cities';
+        const cachedData = cache.get(cacheKey);
+        
+        if (cachedData) {
+            return res.json(cachedData);
+        }
+
         const cities = await City.aggregate([
             {
                 $lookup: {
@@ -51,9 +60,12 @@ router.get("/", async (req, res) => {
             countryId: city.state.countryId
         }));
 
+        // Cache for 10 minutes
+        cache.set(cacheKey, transformedCities, 600000);
+
         res.json(transformedCities);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: "Failed to load cities" });
     }
 });
 

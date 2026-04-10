@@ -1,11 +1,20 @@
 import express from "express";
 import Area from "../models/Area.js";
 
+import { cache } from "../utils/helpers.js";
+
 const router = express.Router();
 
 // GET all areas with city details
 router.get("/", async (req, res) => {
     try {
+        const cacheKey = 'master_areas';
+        const cachedData = cache.get(cacheKey);
+        
+        if (cachedData) {
+            return res.json(cachedData);
+        }
+
         const areas = await Area.aggregate([
             {
                 $lookup: {
@@ -34,9 +43,13 @@ router.get("/", async (req, res) => {
             },
             { $sort: { name: 1 } }
         ]);
+
+        // Cache for 10 minutes
+        cache.set(cacheKey, areas, 600000);
+
         res.json(areas);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: "Failed to load areas" });
     }
 });
 
