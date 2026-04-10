@@ -55,7 +55,7 @@ const httpServer = createServer(app);
 
 // CORS - Must be first to ensure headers are present even if other middleware fails
 const allowedOrigins = process.env.ALLOWED_ORIGINS 
-  ? process.env.ALLOWED_ORIGINS.split(',').map(base => base.trim()) 
+  ? process.env.ALLOWED_ORIGINS.split(',').map(base => base.replace(/^["']|["']$/g, '').trim()) 
   : ["http://localhost:5173", "http://localhost:3000", "https://homex.net.in"];
 
 app.use(cors({
@@ -112,7 +112,7 @@ app.use(helmet({
       scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://cdnjs.cloudflare.com"],
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com", "https://ui-avatars.com"],
       imgSrc: ["'self'", "data:", "https:", "https://res.cloudinary.com", "https://ui-avatars.com"],
-      connectSrc: ["'self'", "https://homex-1.onrender.com", "http://localhost:5000", "wss://homex-1.onrender.com"]
+      connectSrc: ["'self'", "https://homex-1.onrender.com", "http://localhost:5000", "http://localhost:5173", "wss://homex-1.onrender.com"]
     }
   },
   referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
