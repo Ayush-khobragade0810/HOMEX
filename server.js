@@ -148,10 +148,10 @@ app.use(express.urlencoded({ extended: true }));
 
 // app.use(mongoSanitize());
 
-app.use(mongoSanitize({
-  allowDots: true,
-  replaceWith: '_',
-}));
+// app.use(mongoSanitize({
+//   allowDots: true,
+//   replaceWith: '_',
+// }));
 
 // CSRF Utility Setup
 const csrfProtection = csrf({ cookie: true });
