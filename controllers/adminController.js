@@ -1,4 +1,8 @@
+import moment from 'moment';
+import Booking from '../models/Booking.js';
+import User from '../models/User.js';
 import { cache } from '../utils/helpers.js';
+
 
 /**
  * =============================
@@ -15,18 +19,19 @@ export const getDashboardStats = async (req, res) => {
       return res.json({ success: true, ...cachedStats });
     }
 
+    console.log('📊 Fetching fresh dashboard stats...');
+
     const startOfDay = moment().startOf('day').toDate();
     const endOfDay = moment().endOf('day').toDate();
 
+    // Run basic counts in parallel
     const [
       totalUsers,
       totalBookings,
       pendingBookings,
       completedBookings,
       inProgressBookings,
-      todaysBookings,
-      totalEarningsResult,
-      todaysEarningsResult
+      todaysBookings
     ] = await Promise.all([
       User.countDocuments({ role: 'user', isDeleted: { $ne: true } }),
       Booking.countDocuments(),
@@ -49,12 +54,26 @@ export const getDashboardStats = async (req, res) => {
       }),
       Booking.countDocuments({
         'schedule.preferredDate': { $gte: startOfDay, $lte: endOfDay }
-      }),
-      Booking.aggregate([
+      })
+    ]);
+
+    console.log('✅ Basic counts completed');
+
+    // Run aggregations individually with error handling for each to pinpoint failure
+    let totalEarnings = 0;
+    try {
+      const totalEarningsResult = await Booking.aggregate([
         { $match: { 'payment.status': 'paid' } },
         { $group: { _id: null, total: { $sum: '$payment.amount' } } }
-      ]).allowDiskUse(true),
-      Booking.aggregate([
+      ]);
+      totalEarnings = totalEarningsResult[0]?.total || 0;
+    } catch (aggErr) {
+      console.error('❌ Total Earnings Aggregation failed:', aggErr.message);
+    }
+
+    let todaysEarnings = 0;
+    try {
+      const todaysEarningsResult = await Booking.aggregate([
         {
           $match: {
             'payment.status': 'paid',
@@ -62,20 +81,31 @@ export const getDashboardStats = async (req, res) => {
           }
         },
         { $group: { _id: null, total: { $sum: '$payment.amount' } } }
-      ]).allowDiskUse(true)
-    ]);
+      ]);
+      todaysEarnings = todaysEarningsResult[0]?.total || 0;
+    } catch (aggErr) {
+      console.error('❌ Today\'s Earnings Aggregation failed:', aggErr.message);
+    }
 
-    const avgRatingAgg = await Booking.aggregate([
-      { $match: { 'rating.stars': { $exists: true } } },
-      { $group: { _id: null, avg: { $avg: '$rating.stars' } } }
-    ]).allowDiskUse(true);
+    let avgRating = "5.0";
+    try {
+      const avgRatingAgg = await Booking.aggregate([
+        { $match: { 'rating.stars': { $exists: true, $ne: null } } },
+        { $group: { _id: null, avg: { $avg: '$rating.stars' } } }
+      ]);
+      if (avgRatingAgg && avgRatingAgg.length > 0) {
+        avgRating = Number(avgRatingAgg[0].avg).toFixed(1);
+      }
+    } catch (aggErr) {
+      console.error('❌ Avg Rating Aggregation failed:', aggErr.message);
+    }
 
     const stats = {
       totalUsers,
       totalBookings,
-      totalEarnings: totalEarningsResult[0]?.total || 0,
-      todaysEarnings: todaysEarningsResult[0]?.total || 0,
-      avgRating: Number(avgRatingAgg[0]?.avg || 5).toFixed(1),
+      totalEarnings,
+      todaysEarnings,
+      avgRating,
       pendingBookings,
       completedBookings,
       inProgressBookings,
@@ -85,13 +115,19 @@ export const getDashboardStats = async (req, res) => {
     // Cache results for 5 minutes
     cache.set(cacheKey, stats, 5 * 60 * 1000);
 
+    console.log('✅ Dashboard stats compiled successfully');
+
     res.json({
       success: true,
       ...stats
     });
   } catch (err) {
-    console.error('Stats fetch error:', err);
-    res.status(500).json({ success: false, error: 'Stats fetch failed' });
+    console.error('🔴 CRITICAL: getDashboardStats failed:', err);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch dashboard statistics',
+      error: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
   }
 };
 

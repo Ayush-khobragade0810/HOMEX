@@ -49,15 +49,29 @@ app.use(compression());
 const httpServer = createServer(app);
 
 // CORS - Must be first to ensure headers are present even if other middleware fails
+const allowedOrigins = process.env.ALLOWED_ORIGINS 
+  ? process.env.ALLOWED_ORIGINS.split(',').map(base => base.trim()) 
+  : ["http://localhost:5173", "http://localhost:3000", "https://homex.net.in"];
+
 app.use(cors({
-  origin: ["http://localhost:5173", "http://localhost:3000", "https://homex.net.in"], // Match socket cors
+  origin: (origin, callback) => {
+    // Allow requests with no origin (like mobile apps or curl)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.indexOf(origin) !== -1 || allowedOrigins.includes('*')) {
+      callback(null, true);
+    } else {
+      console.warn(`🚦 [CORS REJECTED]: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true
 }));
 
 // Initialize Socket.IO
 const io = new Server(httpServer, {
   cors: {
-    origin: ["http://localhost:5173", "http://localhost:3000", "https://homex.net.in"], // Add your client URLs
+    origin: allowedOrigins,
     methods: ["GET", "POST", "PUT", "DELETE"],
     credentials: true,
     allowedHeaders: ["Authorization"]
