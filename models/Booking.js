@@ -202,7 +202,6 @@ bookingSchema.index({ 'schedule.preferredDate': 1, status: 1 });
 bookingSchema.index({ createdAt: -1 });
 bookingSchema.index({ 'payment.transactionId': 1 });
 bookingSchema.index({ 'metadata.source': 1 });
-bookingSchema.index({ "assignedTo.technicianId": 1, status: 1 });
 bookingSchema.index({ updatedAt: -1 });
 
 // Generate bookingId before save
