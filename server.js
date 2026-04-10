@@ -242,7 +242,7 @@ app.get('/api/ws-health', (req, res) => {
 });
 
 // Catch-all for undefined /api routes to help debug 404s
-app.use('/api/(.*)', (req, res) => {
+app.use('/api', (req, res) => {
   console.warn(`⚠️  [404 NOT FOUND] ${req.method} ${req.originalUrl}`);
   res.status(404).json({
     success: false,
