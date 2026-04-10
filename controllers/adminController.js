@@ -214,8 +214,12 @@ export const getRecentBookings = async (req, res) => {
       }
     });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, error: 'Booking fetch failed' });
+    console.error('🔴 Booking Fetch Error:', err);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch bookings',
+      error: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
   }
 };
 
@@ -237,23 +241,22 @@ export const getAllUsers = async (req, res) => {
     const skip = (page - 1) * limit;
     const { role, search } = req.query;
 
-    const query = {};
+    const query = { isDeleted: { $ne: true } };
 
-    // Robust Role Filter (Case-insensitive)
+    // Robust Role Filter (Case-insensitive & Sanitized)
     if (role && role !== 'all') {
-      query.role = { $regex: new RegExp(`^${role}$`, 'i') };
+      const sanitizedRole = String(role).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      query.role = { $regex: new RegExp(`^${sanitizedRole}$`, 'i') };
     }
 
-    // Search filter (name or email)
+    // Search filter (name or email) (Sanitized)
     if (search) {
+      const sanitizedSearch = String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } }
+        { name: { $regex: sanitizedSearch, $options: 'i' } },
+        { email: { $regex: sanitizedSearch, $options: 'i' } }
       ];
     }
-
-    // Exclude soft-deleted users
-    query.isDeleted = { $ne: true };
 
     const users = await User.find(query)
       .select('-password -refreshTokens')
@@ -265,8 +268,10 @@ export const getAllUsers = async (req, res) => {
     const total = await User.countDocuments(query);
 
     // Get specific counts for UI stats/badges
-    const userCount = await User.countDocuments({ role: /^user$/i, isDeleted: { $ne: true } });
-    const adminCount = await User.countDocuments({ role: /^admin$/i, isDeleted: { $ne: true } });
+    const [userCount, adminCount] = await Promise.all([
+      User.countDocuments({ role: /^user$/i, isDeleted: { $ne: true } }),
+      User.countDocuments({ role: /^admin$/i, isDeleted: { $ne: true } })
+    ]);
 
     res.json({
       success: true,
@@ -285,7 +290,11 @@ export const getAllUsers = async (req, res) => {
     });
   } catch (error) {
     console.error('Get Users Error:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch users' });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch users',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 };
 
@@ -305,41 +314,35 @@ export const getUserStats = async (req, res) => {
 
     const totalFilter = { isDeleted: { $ne: true } };
 
-    // Robust case-insensitive counts
-    const totalUsers = await User.countDocuments({ ...totalFilter, role: /^user$/i });
-    const totalEmployees = await User.countDocuments({ ...totalFilter, role: /^employee$/i });
-
-    // New users this month
-    const startOfMonth = moment().startOf('month').toDate();
-    const newUsers = await User.countDocuments({
-      ...totalFilter,
-      createdAt: { $gte: startOfMonth },
-      role: /^user$/i
-    });
-
-    // Active users
-    const activeUsers = await User.countDocuments({
-      ...totalFilter,
-      role: /^user$/i,
-      $or: [
-        { isActive: true },
-        { isActive: { $exists: false } }
-      ]
-    });
-
-    // Calculate Avg Bookings
-    const totalBookings = await Booking.countDocuments(totalFilter);
-    const avgBookings = totalUsers > 0 ? (totalBookings / totalUsers) : 0;
+    // Parallelize counts for performance
+    const [totalUsers, totalEmployees, startOfMonthCounts, activeUsers, totalBookings] = await Promise.all([
+      User.countDocuments({ ...totalFilter, role: /^user$/i }),
+      User.countDocuments({ ...totalFilter, role: /^employee$/i }),
+      User.countDocuments({
+        ...totalFilter,
+        createdAt: { $gte: moment().startOf('month').toDate() },
+        role: /^user$/i
+      }),
+      User.countDocuments({
+        ...totalFilter,
+        role: /^user$/i,
+        $or: [
+          { isActive: true },
+          { isActive: { $exists: false } }
+        ]
+      }),
+      Booking.countDocuments(totalFilter)
+    ]);
 
     const stats = {
       totalUsers,
       totalEmployees,
-      newUsers,
+      newUsers: startOfMonthCounts,
       activeUsers,
-      avgBookings
+      avgBookings: totalUsers > 0 ? (totalBookings / totalUsers) : 0
     };
 
-    cache.set(cacheKey, stats, 5 * 60 * 1000);
+    cache.set(cacheKey, stats, 120000); // Cache for 2 mins
 
     res.json({
       success: true,
@@ -347,7 +350,11 @@ export const getUserStats = async (req, res) => {
     });
   } catch (error) {
     console.error('User Stats Error:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch user stats' });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch user stats',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 };
 
@@ -358,33 +365,12 @@ export const getUserStats = async (req, res) => {
  */
 export const debugUsers = async (req, res) => {
   try {
-    console.log('=== DEBUG MODE: USER DATA ANALYSIS ===');
-
-    const allUsers = await User.find({});
-    console.log(`📊 Total users in DB: ${allUsers.length}`);
-
-    if (allUsers.length > 0) {
-      console.log(`👤 User SAMPLE (First 3):`, allUsers.slice(0, 3).map(u => ({
-        _id: u._id,
-        email: u.email,
-        role: u.role,
-        isActive: u.isActive,
-        isDeleted: u.isDeleted
-      })));
-    }
-
-    const totalCount = await User.countDocuments();
-    const activeCount = await User.countDocuments({ isActive: true });
-    const adminCount = await User.countDocuments({ role: /^admin$/i });
-    const userCount = await User.countDocuments({ role: /^user$/i });
-
+    const allUsers = await User.find({}).limit(100).lean();
+    
     res.json({
       success: true,
       stats: {
-        total: totalCount,
-        active: activeCount,
-        admin: adminCount,
-        users: userCount,
+        total: allUsers.length,
         rawUsers: allUsers.map(u => ({
           id: u._id,
           email: u.email,
@@ -396,6 +382,6 @@ export const debugUsers = async (req, res) => {
 
   } catch (error) {
     console.error('Debug error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Internal server error' });
   }
 };

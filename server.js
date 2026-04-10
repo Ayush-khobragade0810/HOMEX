@@ -101,20 +101,20 @@ mongoose.connect(process.env.MONGO_URI, {
 // Security Middleware
 // Security Middleware
 app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" },
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "https://cdnjs.cloudflare.com", "'unsafe-inline'"],
-      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
-      imgSrc: ["'self'", "data:", "http://localhost:5000", "https://*"],
-      connectSrc: ["'self'", "https://cdnjs.cloudflare.com"],
-      fontSrc: ["'self'", "https://fonts.gstatic.com"],
-      frameSrc: ["'self'"],
-      objectSrc: ["'none'"]
+      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://cdnjs.cloudflare.com"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com", "https://ui-avatars.com"],
+      imgSrc: ["'self'", "data:", "https:", "https://res.cloudinary.com", "https://ui-avatars.com"],
+      connectSrc: ["'self'", "https://homex-1.onrender.com", "http://localhost:5000", "wss://homex-1.onrender.com"]
     }
   },
-  crossOriginResourcePolicy: { policy: "cross-origin" },
-  crossOriginEmbedderPolicy: false
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+  xContentTypeOptions: true,
+  xFrameOptions: { action: 'deny' },
+  dnsPrefetchControl: { allow: false }
 }));
 // HSTS headers
 app.use((req, res, next) => {
@@ -253,14 +253,33 @@ app.use('/api/*', (req, res) => {
 
 // Error Handling Middleware
 app.use((err, req, res, next) => {
-  logger.error(err);
+  if (err.name === 'UnauthorizedError') {
+    return res.status(401).json({ success: false, message: 'Invalid token' });
+  }
 
   const statusCode = err.statusCode || 500;
-  res.status(statusCode).json({
+  const isDev = process.env.NODE_ENV === 'development';
+
+  const response = {
     success: false,
-    message: err.message || 'Server Error',
-    stack: err.stack // Force stack for debugging
-  });
+    message: err.message || 'Internal Server Error'
+  };
+
+  // Only leak stack in development for security
+  if (isDev) {
+    response.stack = err.stack;
+    logger.error(err);
+  } else {
+    // Log the error internally but don't expose it
+    logger.error({
+      message: err.message,
+      stack: err.stack,
+      path: req.path,
+      method: req.method
+    }, 'Unhandled Server Error');
+  }
+
+  res.status(statusCode).json(response);
 });
 
 const PORT = process.env.PORT || 5000;
@@ -301,8 +320,15 @@ httpServer.listen(PORT, () => {
 });
 
 // Handle unhandled promise rejections
-process.on('unhandledRejection', (err, promise) => {
-  logger.error({ err }, 'Unhandled Rejection');
-  // Close server & exit process
-  // httpServer.close(() => process.exit(1));
+process.on('unhandledRejection', (err) => {
+  logger.error({ err: err.message, stack: err.stack }, '🔴 Unhandled Rejection! Shutting down gracefully...');
+  // In production, we should restart the process to avoid zombie states
+  if (process.env.NODE_ENV === 'production') {
+    setTimeout(() => process.exit(1), 1000);
+  }
+});
+
+process.on('uncaughtException', (err) => {
+  logger.error({ err: err.message, stack: err.stack }, '🔴 Uncaught Exception! Shutting down gracefully...');
+  setTimeout(() => process.exit(1), 1000);
 });

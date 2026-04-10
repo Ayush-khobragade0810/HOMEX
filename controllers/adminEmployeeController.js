@@ -1,6 +1,4 @@
-import Employee from "../models/adminEmployee.js";
-import mongoose from "mongoose";
-import Booking from '../models/Booking.js';
+import { cache } from "../utils/helpers.js";
 
 /**
  * @desc    Search and list employees with aggregated stats
@@ -13,62 +11,78 @@ export const searchEmployees = async (req, res) => {
 
         // Build query based on status param
         const query = {};
+        let statusFilter = '';
         if (req.query.status) {
-            query.status = { $regex: new RegExp(`^${req.query.status}$`, 'i') };
+            // Sanitize status to prevent Regex Injection
+            statusFilter = String(req.query.status).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            query.status = { $regex: new RegExp(`^${statusFilter}$`, 'i') };
+        }
+
+        const cacheKey = `employees_list_${statusFilter || 'all'}`;
+        const cachedResults = cache.get(cacheKey);
+        if (cachedResults) {
+            console.log("🚀 Serving employees list from cache");
+            return res.json(cachedResults);
         }
 
         const employees = await Employee.find(query).select('-avatar').lean();
         console.log(`SEARCH EMPLOYEES: Found ${employees.length} records.`);
-        if (employees.length === 0) return res.json([]);
+        if (employees.length === 0) {
+            cache.set(cacheKey, [], 30000); // Cache empty result for 30s
+            return res.json([]);
+        }
 
         const employeeIds = employees.map(e => e._id);
 
-        // 1. Efficiently aggregate earnings per employee
-        const earningsStats = await Booking.aggregate([
-            { 
-                $match: { 
-                    "assignedTo.technicianId": { $in: employeeIds }, 
-                    status: { $in: ["completed", "COMPLETED"] } 
-                } 
-            },
-            { 
-                $group: { 
-                    _id: "$assignedTo.technicianId", 
-                    total: { 
-                        $sum: { 
-                            $ifNull: ["$payment.amount", { $ifNull: ["$serviceDetails.price", 0] }] 
+        // Run aggregations in parallel to avoid sequential blocking
+        const [earningsStats, currentTaskStats] = await Promise.all([
+            // 1. Efficiently aggregate earnings per employee
+            Booking.aggregate([
+                { 
+                    $match: { 
+                        "assignedTo.technicianId": { $in: employeeIds }, 
+                        status: { $in: ["completed", "COMPLETED", "Completed"] } 
+                    } 
+                },
+                { 
+                    $group: { 
+                        _id: "$assignedTo.technicianId", 
+                        total: { 
+                            $sum: { 
+                                $ifNull: ["$payment.amount", { $ifNull: ["$serviceDetails.price", 0] }] 
+                            } 
                         } 
                     } 
-                } 
-            }
-        ]);
+                }
+            ]).hint({ "assignedTo.technicianId": 1, status: 1 }), // Use the new index
 
-        // 2. Efficiently find the latest active task per employee
-        const currentTaskStats = await Booking.aggregate([
-            { 
-                $match: { 
-                    "assignedTo.technicianId": { $in: employeeIds }, 
-                    status: { $in: ['assigned', 'ASSIGNED', 'in_progress', 'IN_PROGRESS', 'navigating', 'NAVIGATING', 'started', 'STARTED', 'ACCEPTED'] } 
-                } 
-            },
-            { $sort: { updatedAt: -1 } },
-            { 
-                $group: { 
-                    _id: "$assignedTo.technicianId", 
-                    latestTask: { $first: "$$ROOT" } 
-                } 
-            }
+            // 2. Efficiently find the latest active task per employee
+            Booking.aggregate([
+                { 
+                    $match: { 
+                        "assignedTo.technicianId": { $in: employeeIds }, 
+                        status: { $in: ['assigned', 'ASSIGNED', 'in_progress', 'IN_PROGRESS', 'navigating', 'NAVIGATING', 'started', 'STARTED', 'ACCEPTED', 'Accepted', 'Confirmed', 'confirmed'] } 
+                    } 
+                },
+                { $sort: { updatedAt: -1 } },
+                { 
+                    $group: { 
+                        _id: "$assignedTo.technicianId", 
+                        latestTask: { $first: "$$ROOT" } 
+                    } 
+                }
+            ]).hint({ "assignedTo.technicianId": 1, status: 1 }) // Use the new index
         ]);
 
         // Create fast lookup maps
         const earningsMap = {};
         earningsStats.forEach(stat => {
-            earningsMap[stat._id.toString()] = stat.total;
+            if (stat._id) earningsMap[stat._id.toString()] = stat.total;
         });
 
         const taskMap = {};
         currentTaskStats.forEach(stat => {
-            taskMap[stat._id.toString()] = stat.latestTask;
+            if (stat._id) taskMap[stat._id.toString()] = stat.latestTask;
         });
 
         // Format employees with aggregated data
@@ -95,9 +109,9 @@ export const searchEmployees = async (req, res) => {
                 currentTask: currentTask ? {
                     bookingId: currentTask.bookingId,
                     serviceName: currentTask.serviceDetails?.title || currentTask.serviceName || "Service",
-                    status: currentTask.status === 'IN_PROGRESS' || currentTask.status === 'in_progress' ? 'In Progress' : currentTask.status,
-                    customerName: currentTask.contactIdInfo?.fullName || currentTask.contactInfo?.fullName || currentTask.userId?.name || "Customer",
-                    customerPhone: currentTask.contactIdInfo?.phoneNumber || currentTask.contactInfo?.phoneNumber || currentTask.userId?.phone || "N/A",
+                    status: currentTask.status.toLowerCase() === 'in_progress' ? 'In Progress' : currentTask.status,
+                    customerName: currentTask.contactIdInfo?.fullName || currentTask.contactInfo?.fullName || "Customer",
+                    customerPhone: currentTask.contactIdInfo?.phoneNumber || currentTask.contactInfo?.phoneNumber || "N/A",
                     date: currentTask.schedule?.preferredDate,
                     time: currentTask.schedule?.timeSlot,
                     location: currentTask.location?.completeAddress || currentTask.location?.address || "N/A"
@@ -105,10 +119,17 @@ export const searchEmployees = async (req, res) => {
             };
         });
 
+        // Cache for 60 seconds to reduce DB load
+        cache.set(cacheKey, formattedEmployees, 60000);
+
         res.json(formattedEmployees);
     } catch (err) {
-        console.error("Error in searchEmployees:", err);
-        res.status(500).json({ error: err.message });
+        console.error("🔴 Error in searchEmployees:", err);
+        res.status(500).json({ 
+            success: false, 
+            message: "Failed to load employee list",
+            error: process.env.NODE_ENV === 'development' ? err.message : undefined
+        });
     }
 };
 
