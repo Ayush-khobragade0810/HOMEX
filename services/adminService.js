@@ -3,7 +3,7 @@ import axios from 'axios';
 
 // Admin token configuration
 const ADMIN_TOKEN = process.env.REACT_APP_ADMIN_TOKEN || 'admin-secret-token-123';
-const API_BASE_URL = process.env.REACT_APP_API_URL || '';
+const API_BASE_URL = process.env.REACT_APP_API_URL || 'https://homex-1.onrender.com';
 
 // Create axios instance with default config
 const adminApi = axios.create({

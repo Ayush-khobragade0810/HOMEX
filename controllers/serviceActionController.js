@@ -267,7 +267,7 @@ export const getAssigned = async (req, res) => {
             scheduledDate: b.schedule?.preferredDate,
             time: b.schedule?.timeSlot || '09:00 AM',
             duration: getBookingDuration(b),
-            estimatedEarnings: (b.serviceDetails?.price || 0) * 0.8
+            estimatedEarnings: b.serviceDetails?.price || 0
         })));
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -294,7 +294,7 @@ export const getPending = async (req, res) => {
             status: 'pending',
             customer: b.contactIdInfo?.fullName || b.contactInfo?.fullName || b.userId?.name || 'Guest',
             address: b.location?.completeAddress || 'No address',
-            estimatedEarnings: (b.serviceDetails?.price || 0) * 0.8,
+            estimatedEarnings: b.serviceDetails?.price || 0,
             duration: getBookingDuration(b)
         })));
     } catch (err) {
