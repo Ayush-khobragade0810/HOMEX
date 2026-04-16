@@ -260,10 +260,14 @@ export const getAssigned = async (req, res) => {
             _id: b._id,
             id: b.bookingId,
             serviceType: b.serviceDetails?.title || b.serviceId?.title || 'Service',
+            category: b.serviceDetails?.category || b.category || 'General',
             status: b.status.toLowerCase(),
             customer: b.contactIdInfo?.fullName || b.contactInfo?.fullName || b.userId?.name || 'Guest',
             address: b.location?.completeAddress || b.userId?.address || '',
+            landmark: b.location?.landmark || '',
+            pincode: b.location?.pincode || '',
             customerPhone: b.contactIdInfo?.phoneNumber || b.contactInfo?.phoneNumber || b.userId?.phone || '',
+            alternatePhone: b.contactIdInfo?.alternatePhone || '',
             scheduledDate: b.schedule?.preferredDate,
             time: b.schedule?.timeSlot || '09:00 AM',
             duration: getBookingDuration(b),
@@ -291,9 +295,14 @@ export const getPending = async (req, res) => {
             id: b._id,
             serviceType: b.serviceDetails?.category || 'General',
             title: b.serviceDetails?.title || 'Service Task',
+            category: b.serviceDetails?.category || 'General',
             status: 'pending',
             customer: b.contactIdInfo?.fullName || b.contactInfo?.fullName || b.userId?.name || 'Guest',
             address: b.location?.completeAddress || 'No address',
+            landmark: b.location?.landmark || '',
+            pincode: b.location?.pincode || '',
+            customerPhone: b.contactIdInfo?.phoneNumber || b.userId?.phone || '',
+            alternatePhone: b.contactIdInfo?.alternatePhone || '',
             estimatedEarnings: b.serviceDetails?.price || 0,
             duration: getBookingDuration(b)
         })));
@@ -319,8 +328,14 @@ export const getCompleted = async (req, res) => {
         res.json(bookings.map(b => ({
             id: b._id,
             serviceType: b.serviceDetails?.title || 'Service',
+            category: b.serviceDetails?.category || 'General',
             status: 'completed',
             customer: b.contactIdInfo?.fullName || b.contactInfo?.fullName || b.userId?.name || 'Guest',
+            address: b.location?.completeAddress || b.userId?.address || '',
+            landmark: b.location?.landmark || '',
+            pincode: b.location?.pincode || '',
+            customerPhone: b.contactIdInfo?.phoneNumber || b.userId?.phone || '',
+            alternatePhone: b.contactIdInfo?.alternatePhone || '',
             completedDate: b.completedAt || b.updatedAt,
             duration: getBookingDuration(b),
             payment: b.payment?.amount || 0
@@ -346,9 +361,13 @@ export const getInProgress = async (req, res) => {
 
         const mappedB = bookings.map(b => ({
             id: b.bookingId, _id: b._id, serviceType: b.serviceDetails?.title || 'Service',
+            category: b.serviceDetails?.category || 'General',
             status: 'in_progress', customer: b.contactIdInfo?.fullName || b.userId?.name || 'Guest',
             address: b.location?.completeAddress || b.userId?.address || '',
+            landmark: b.location?.landmark || '',
+            pincode: b.location?.pincode || '',
             customerPhone: b.contactIdInfo?.phoneNumber || b.userId?.phone || '',
+            alternatePhone: b.contactIdInfo?.alternatePhone || '',
             scheduledDate: b.schedule?.preferredDate, duration: getBookingDuration(b),
             estimatedEarnings: b.serviceDetails?.price || 0
         }));

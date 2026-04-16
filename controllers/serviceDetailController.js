@@ -24,8 +24,13 @@ export const getServiceDetails = async (req, res) => {
                 priority: note.priority,
                 createdBy: note.createdBy
             })),
+            category: service.category || service.serviceType || 'General',
             specialRequirements: service.notes ? [service.notes] : [],
-            customerPhone: service.customer?.phone || 'N/A'
+            customerPhone: service.customer?.phone || 'N/A',
+            alternatePhone: service.customer?.alternatePhone || 'N/A',
+            address: service.customer?.address || 'No address provided',
+            landmark: service.customer?.landmark || 'N/A',
+            pincode: service.customer?.pincode || 'N/A'
         };
 
         res.json(serviceDetails);

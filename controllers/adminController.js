@@ -272,7 +272,8 @@ export const getAllUsers = async (req, res) => {
     const usersWithBookings = await Promise.all(users.map(async (user) => {
       const bookingCount = await Booking.countDocuments({
         $or: [
-          { customer: user._id },
+          { userId: user._id },
+          { 'contactIdInfo.email': user.email },
           { userEmail: user.email }
         ]
       });

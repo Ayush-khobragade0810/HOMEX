@@ -195,11 +195,11 @@ export const generateInvoiceHTML = (booking) => {
     <div id="invoice-card">
         <div class="header">
             <div class="company-info">
-                <h1>HOMAX</h1>
+                <h1>HOMEX</h1>
                 <p>Premium Home Services</p>
                 <p>123 Service Street, Tech City</p>
                 <p>Phone: +91 98765 43210</p>
-                <p>Email: support@homax.com</p>
+                <p>Email: support@homex.com</p>
             </div>
             <div class="invoice-details">
                 <h2>INVOICE</h2>
@@ -263,7 +263,7 @@ export const generateInvoiceHTML = (booking) => {
         </div>
 
         <div class="footer">
-            <p>Thank you for choosing Homax for your home needs!</p>
+            <p>Thank you for choosing Homex for your home needs!</p>
             <p>This is a computer-generated invoice and does not require a signature.</p>
         </div>
     </div>

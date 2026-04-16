@@ -108,9 +108,13 @@ router.get("/users/:id", authenticateAdmin, async (req, res) => {
 
     // Get user's bookings
     const bookings = await Booking.find({
-      customer: user._id
+      $or: [
+        { userId: user._id },
+        { 'contactIdInfo.email': user.email },
+        { userEmail: user.email }
+      ]
     })
-      .populate('service', 'name title category price')
+      .populate('serviceId', 'title category price duration')
       .sort({ createdAt: -1 })
       .limit(20)
       .lean();

@@ -17,9 +17,13 @@ const serviceSchema = new mongoose.Schema({
     customer: {
         name: String,
         address: String,
+        landmark: String,
+        pincode: String,
         phone: String,
+        alternatePhone: String,
         email: String
     },
+    category: String,
     scheduledDate: { type: Date, required: true },
     time: { type: String, required: true }, // "10:00 AM" format
     duration: { type: Number, default: 1 }, // hours
