@@ -96,15 +96,22 @@ export const createBooking = async (req, res) => {
     }
     const durationFromTimeSlot = calculateDurationFromTimeSlot(schedule.timeSlot);
 
-    // Validate location by Area ID or manual name
-    console.log('🌍 [2C] Validating Location/Area...');
-    const targetAreaId = req.body.areaId || (location && location.areaId) || req.body.area;
-    const manualAreaName = req.body.areaName || (location && location.areaName);
-    const country = location.country || req.body.country;
-    const state = location.state || req.body.state;
-    const city = location.city || req.body.city;
+    // Validate location by Area ID or manual name (Production-Level Fix)
+    console.log('🌍 [DEBUG] Incoming Payload:', JSON.stringify({ 
+      areaId: req.body.areaId, 
+      location: req.body.location 
+    }, null, 2));
+
+    const targetAreaId = req.body.areaId || (location && location.areaId);
+    const manualAreaName = req.body.areaName || (location && (location.areaName || location.area)) || req.body.area;
+    const country = (location && location.country) || req.body.country;
+    const state = (location && location.state) || req.body.state;
+    const city = (location && location.city) || req.body.city;
+
+    console.log('🔍 [DEBUG] Extracted:', { targetAreaId, manualAreaName, country, state, city });
 
     if (!targetAreaId && !manualAreaName) {
+      console.log('❌ [DEBUG] Validation Failed: No areaId and no manualAreaName');
       throw new Error("Area is required. Please select a valid location from the list or enter manually.");
     }
 
