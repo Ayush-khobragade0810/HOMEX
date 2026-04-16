@@ -71,14 +71,11 @@ const bookingSchema = new mongoose.Schema({
     originalDate: Date // Store original date for history
   },
   location: {
-    country: String,
-    countryId: Number,
-    state: String,
-    stateId: Number,
-    city: String,
-    cityId: Number,
-    area: String,
-    areaId: Number,
+    area: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Area',
+      required: true
+    },
     address: String,
     pincode: String,
     landmark: String,

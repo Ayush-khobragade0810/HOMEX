@@ -53,36 +53,6 @@ const calculateDurationFromTimeSlot = (timeSlot) => {
   return diff > 0 ? diff : null;
 };
 
-const resolveLocations = async (countryName, stateName, cityName, areaName) => {
-  let countryId = null, stateId = null, cityId = null, areaId = null;
-
-  if (countryName) {
-    let country = await Country.findOne({ countryName: { $regex: new RegExp(`^${countryName}$`, 'i') } });
-    if (!country) country = await Country.create({ countryName });
-    countryId = country.countryId;
-
-    if (stateName) {
-      let state = await State.findOne({ stateName: { $regex: new RegExp(`^${stateName}$`, 'i') }, countryId });
-      if (!state) state = await State.create({ stateName, countryId });
-      stateId = state.stateId;
-
-      if (cityName) {
-        let city = await City.findOne({ cityName: { $regex: new RegExp(`^${cityName}$`, 'i') }, stateId });
-        if (!city) city = await City.create({ cityName, stateId });
-        cityId = city.cityId;
-
-        if (areaName) {
-          let area = await Area.findOne({ areaName: { $regex: new RegExp(`^${areaName}$`, 'i') }, cityId });
-          if (!area) area = await Area.create({ areaName, cityId });
-          areaId = area.areaId;
-        }
-      }
-    }
-  }
-
-  return { countryId, stateId, cityId, areaId };
-};
-
 
 // @desc    Create new booking
 // @route   POST /api/bookings
@@ -126,14 +96,25 @@ export const createBooking = async (req, res) => {
     }
     const durationFromTimeSlot = calculateDurationFromTimeSlot(schedule.timeSlot);
 
-    // Resolve location IDs dynamically
-    console.log('🌍 [2C] Resolving location IDs...');
-    const resolvedIds = await resolveLocations(
-      location.country,
-      location.state,
-      location.city,
-      location.area
-    );
+    // Validate location by Area ID
+    console.log('🌍 [2C] Validating Master Area ID...');
+    const targetAreaId = req.body.areaId || (location && location.areaId) || req.body.area;
+    
+    if (!targetAreaId) {
+      throw new Error("Area is required. Please select a valid location from the list.");
+    }
+    
+    // Check if Area exists
+    let areaDoc;
+    try {
+      areaDoc = await Area.findById(targetAreaId);
+    } catch(e) {
+      // Catch bad ObjectIds
+    }
+    
+    if (!areaDoc) {
+      throw new Error("Area not found. Please select a valid location.");
+    }
 
     const actualUserId = req.user.userId || req.user._id || req.user.id;
 
@@ -159,11 +140,8 @@ export const createBooking = async (req, res) => {
         originalDate: new Date(schedule.preferredDate)
       },
       location: {
-        ...location,
-        countryId: resolvedIds.countryId,
-        stateId: resolvedIds.stateId,
-        cityId: resolvedIds.cityId,
-        areaId: resolvedIds.areaId
+        area: areaDoc._id,
+        address: location.completeAddress || location.address || ""
       },
       // Persist customer contact in schema-compatible field
       contactIdInfo: contactInfo || {

@@ -1,20 +1,20 @@
 import mongoose from "mongoose";
 
 const areaSchema = new mongoose.Schema({
-    areaId: { type: Number, unique: true },
-    areaName: { type: String, required: true },
-    cityId: { type: Number, required: true },
+    areaName: { type: String, required: true, trim: true },
+    city: { type: String, required: true },
+    state: { type: String, required: true },
+    country: { type: String, required: true },
     pincode: String,
     description: String
-});
+}, { timestamps: true });
 
-// Auto-increment areaId
-areaSchema.pre('save', async function(next) {
-    if (this.isNew) {
-        const lastArea = await this.constructor.findOne().sort({ areaId: -1 });
-        this.areaId = lastArea ? lastArea.areaId + 1 : 1;
-    }
-    next();
-});
+// Strong uniqueness (correct design)
+areaSchema.index(
+    { areaName: 1, city: 1, state: 1, country: 1 },
+    { unique: true }
+);
 
-export default mongoose.model("Area", areaSchema);
+const AreaModel = mongoose.model("Area", areaSchema);
+
+export default AreaModel;

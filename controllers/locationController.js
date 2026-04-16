@@ -1,7 +1,4 @@
 // controllers/locationController.js
-import Country from '../models/Country.js';
-import State from '../models/State.js';
-import City from '../models/City.js';
 import Area from '../models/Area.js';
 import mongoose from 'mongoose';
 
@@ -76,11 +73,8 @@ export const getCountries = async (req, res) => {
       });
     }
 
-    // Get data from database
-    const countries = await Country.find({})
-      .select('countryName -_id')
-      .sort({ countryName: 1 })
-      .lean();
+    // Get distinct countries from the master Area model
+    const countries = await Area.distinct('country');
 
     if (!countries || countries.length === 0) {
       return res.status(404).json({
@@ -89,7 +83,8 @@ export const getCountries = async (req, res) => {
       });
     }
     
-    const data = countries.map(country => country.countryName);
+    // Sort array of strings
+    const data = countries.sort();
     
     res.status(200).json({
       success: true,
@@ -149,23 +144,10 @@ export const getStates = async (req, res) => {
       });
     }
 
-    // Security: Use parameterized query (handled by Mongoose)
-    // First find the country by name
-    const countryDoc = await Country.findOne({ 
-      countryName: { $regex: new RegExp(`^${country}$`, 'i') } 
-    }).lean();
-
-    if (!countryDoc) {
-      return res.status(404).json({
-        success: false,
-        message: `Country not found: ${country}`
-      });
-    }
-
-    const states = await State.find({ countryId: countryDoc.countryId })
-      .select('stateName -_id')
-      .sort({ stateName: 1 })
-      .lean();
+    // Security: Use distinct query
+    const states = await Area.distinct('state', { 
+       country: { $regex: new RegExp(`^${country}$`, 'i') } 
+    });
 
     if (!states || states.length === 0) {
       return res.status(404).json({
@@ -174,7 +156,7 @@ export const getStates = async (req, res) => {
       });
     }
     
-    const data = states.map(state => state.stateName);
+    const data = states.sort();
     
     res.status(200).json({
       success: true,
@@ -235,23 +217,11 @@ export const getCities = async (req, res) => {
       });
     }
 
-    // Find state by name
-    const stateDoc = await State.findOne({ 
-      stateName: { $regex: new RegExp(`^${state}$`, 'i') } 
-    }).lean();
-
-    if (!stateDoc) {
-      return res.status(404).json({
-        success: false,
-        message: `State not found: ${state}`
-      });
-    }
-
-    // Security: Use parameterized query
-    const cities = await City.find({ stateId: stateDoc.stateId })
-      .select('cityName -_id')
-      .sort({ cityName: 1 })
-      .lean();
+    // Get distinct cities
+    const cities = await Area.distinct('city', { 
+       country: { $regex: new RegExp(`^${country}$`, 'i') },
+       state: { $regex: new RegExp(`^${state}$`, 'i') } 
+    });
     
     if (!cities || cities.length === 0) {
       return res.status(404).json({
@@ -260,7 +230,7 @@ export const getCities = async (req, res) => {
       });
     }
     
-    const data = cities.map(city => city.cityName);
+    const data = cities.sort();
     
     res.status(200).json({
       success: true,
@@ -324,30 +294,20 @@ export const getAreas = async (req, res) => {
 
     console.log(`🔍 [BACKEND] Searching areas for: ${country}, ${state}, ${city}`);
 
-    let areas = [];
-
-    // Find city by name
-    const cityDoc = await City.findOne({ 
-      cityName: { $regex: new RegExp(`^${city}$`, 'i') } 
-    }).lean();
-
-    if (!cityDoc) {
-      return res.status(404).json({
-        success: false,
-        message: `City not found: ${city}`
-      });
-    }
-
-    // Approach 1: Use proper relational ID
-    areas = await Area.find({ cityId: cityDoc.cityId })
-      .select('areaName -_id')
+    // Find all matching areas and retrieve _id and areaName
+    areas = await Area.find({ 
+        country: { $regex: new RegExp(`^${country}$`, 'i') },
+        state: { $regex: new RegExp(`^${state}$`, 'i') },
+        city: { $regex: new RegExp(`^${city}$`, 'i') } 
+    })
+      .select('_id areaName')
       .sort({ areaName: 1 })
       .lean();
 
     console.log(`🔍 [BACKEND] Found ${areas.length} areas for ${city}`);
 
-    // Return empty array instead of 404 if no areas found
-    const data = areas.map(area => area.areaName);
+    // Return the object list so frontend can capture areaId (_id)
+    const data = areas;
     
     res.status(200).json({
       success: true,
