@@ -268,6 +268,20 @@ export const getAllUsers = async (req, res) => {
       .limit(limit)
       .lean();
 
+    // Attach booking count for each user
+    const usersWithBookings = await Promise.all(users.map(async (user) => {
+      const bookingCount = await Booking.countDocuments({
+        $or: [
+          { customer: user._id },
+          { userEmail: user.email }
+        ]
+      });
+      return {
+        ...user,
+        bookings: bookingCount
+      };
+    }));
+
     const total = await User.countDocuments(query);
 
     // Get specific counts for UI stats/badges
@@ -278,7 +292,7 @@ export const getAllUsers = async (req, res) => {
 
     res.json({
       success: true,
-      users,
+      users: usersWithBookings,
       pagination: {
         page,
         limit,
