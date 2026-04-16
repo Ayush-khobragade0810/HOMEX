@@ -96,24 +96,51 @@ export const createBooking = async (req, res) => {
     }
     const durationFromTimeSlot = calculateDurationFromTimeSlot(schedule.timeSlot);
 
-    // Validate location by Area ID
-    console.log('🌍 [2C] Validating Master Area ID...');
+    // Validate location by Area ID or manual name
+    console.log('🌍 [2C] Validating Location/Area...');
     const targetAreaId = req.body.areaId || (location && location.areaId) || req.body.area;
-    
-    if (!targetAreaId) {
-      throw new Error("Area is required. Please select a valid location from the list.");
+    const manualAreaName = req.body.areaName || (location && location.areaName);
+    const country = location.country || req.body.country;
+    const state = location.state || req.body.state;
+    const city = location.city || req.body.city;
+
+    if (!targetAreaId && !manualAreaName) {
+      throw new Error("Area is required. Please select a valid location from the list or enter manually.");
     }
-    
-    // Check if Area exists
+
+    // Check if Area exists by ID
     let areaDoc;
-    try {
-      areaDoc = await Area.findById(targetAreaId);
-    } catch(e) {
-      // Catch bad ObjectIds
+    if (targetAreaId && mongoose.Types.ObjectId.isValid(targetAreaId)) {
+      try {
+        areaDoc = await Area.findById(targetAreaId);
+      } catch (e) {
+        console.warn('Invalid Area ID format:', targetAreaId);
+      }
     }
-    
+
+    // Handle manual area entry if ID not found/provided
+    if (!areaDoc && manualAreaName && country && state && city) {
+      console.log('🔍 Searching for manual area:', manualAreaName);
+      areaDoc = await Area.findOne({
+        areaName: { $regex: new RegExp(`^${manualAreaName.trim()}$`, 'i') },
+        city: { $regex: new RegExp(`^${city.trim()}$`, 'i') },
+        state: { $regex: new RegExp(`^${state.trim()}$`, 'i') },
+        country: { $regex: new RegExp(`^${country.trim()}$`, 'i') }
+      });
+
+      if (!areaDoc) {
+        console.log('🆕 Creating new Master Area for manual entry...');
+        areaDoc = await Area.create({
+          areaName: manualAreaName.trim(),
+          city: city.trim(),
+          state: state.trim(),
+          country: country.trim()
+        });
+      }
+    }
+
     if (!areaDoc) {
-      throw new Error("Area not found. Please select a valid location.");
+      throw new Error("Location details incomplete. Please provide Country, State, and City if entering Area manually.");
     }
 
     const actualUserId = req.user.userId || req.user._id || req.user.id;

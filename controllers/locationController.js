@@ -295,7 +295,7 @@ export const getAreas = async (req, res) => {
     console.log(`🔍 [BACKEND] Searching areas for: ${country}, ${state}, ${city}`);
 
     // Find all matching areas and retrieve _id and areaName
-    areas = await Area.find({ 
+    const areas = await Area.find({ 
         country: { $regex: new RegExp(`^${country}$`, 'i') },
         state: { $regex: new RegExp(`^${state}$`, 'i') },
         city: { $regex: new RegExp(`^${city}$`, 'i') } 
