@@ -75,7 +75,20 @@ const io = new Server(httpServer, {
 mongoose.connect(process.env.MONGO_URI, {
   family: 4
 })
-  .then(() => logger.info('MongoDB Connected'))
+  .then(async () => {
+    logger.info('MongoDB Connected');
+    // Permanent Ghost Index Fix: Ensure areaId_1 is never allowed to exist
+    try {
+      const areas = mongoose.connection.collection('areas');
+      const indexes = await areas.indexes();
+      if (indexes.some(idx => idx.name === 'areaId_1')) {
+        await areas.dropIndex('areaId_1');
+        console.log('✨ [PERMANENT FIX] Ghost index "areaId_1" detected and removed from collection "areas".');
+      }
+    } catch (err) {
+      // Silent fail if collection or index lookup fails
+    }
+  })
   .catch((err) => {
     logger.error('MongoDB connection failed', err);
     process.exit(1);
