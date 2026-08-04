@@ -6,6 +6,7 @@ import Payment from "../models/Payment.js";
 import UpcomingPayment from "../models/UpcomingPayment.js";
 import { emitBookingUpdate } from "../socket.js";
 import mongoose from "mongoose";
+import { computeBilling, normalizeExtraService } from "../utils/billing.js";
 
 const parseClockToMinutes = (value) => {
     if (!value) return null;
@@ -145,16 +146,47 @@ export const startService = async (req, res) => {
 export const completeService = async (req, res) => {
     try {
         const { id } = req.params;
-        const { actualEarnings, notes, completionTime } = req.body;
+        const { actualEarnings, notes, completionTime, extraServices } = req.body;
         const { default: Booking } = await import('../models/Booking.js');
         const query = mongoose.Types.ObjectId.isValid(id) ? { _id: id } : { bookingId: id };
+
+        const existing = await Booking.findOne(query).lean();
+        if (!existing) return res.status(404).json({ message: "Booking not found" });
+
+        // Append any extra services submitted alongside completion. Duplicates
+        // are intentionally kept as separate line items (business rule).
+        const nextExtras = [...(existing.extraServices || [])];
+        if (Array.isArray(extraServices)) {
+            for (const raw of extraServices) {
+                const line = normalizeExtraService(raw);
+                if (!line.name) continue;
+                nextExtras.push({
+                    ...line,
+                    addedBy: req.user?.id,
+                    addedByRole: isAdminRequest(req) ? 'admin' : 'employee',
+                    addedAt: new Date()
+                });
+            }
+        }
+
+        // Recompute the invoice from the single source of truth.
+        const billing = computeBilling(existing, { extraServices: nextExtras });
+
+        // The employee records what was actually collected (which may include a
+        // tip); fall back to the computed grand total when not supplied.
+        const collected =
+            actualEarnings !== undefined && actualEarnings !== null && actualEarnings !== ''
+                ? Number(actualEarnings)
+                : billing.grandTotal;
 
         const booking = await Booking.findOneAndUpdate(
             query,
             {
                 status: 'COMPLETED',
                 completedAt: completionTime || new Date(),
-                'payment.amount': actualEarnings,
+                extraServices: nextExtras,
+                billing,
+                'payment.amount': collected,
                 'payment.status': 'paid',
                 technicianNotes: notes,
                 updatedAt: new Date()
@@ -170,10 +202,187 @@ export const completeService = async (req, res) => {
             type: 'service_completed',
             message: `Completed ${booking.serviceDetails?.title} service for ${booking.userId?.name}`,
             serviceId: booking._id,
-            metadata: { earnings: actualEarnings }
+            metadata: {
+                earnings: collected,
+                extrasTotal: billing.extrasTotal,
+                grandTotal: billing.grandTotal
+            }
         });
 
-        res.json({ message: "Service completed successfully", service: { ...booking.toObject(), id: booking._id } });
+        res.json({
+            message: "Service completed successfully",
+            service: { ...booking.toObject(), id: booking._id },
+            billing
+        });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Extra services — additional charges added during an ongoing appointment.
+// Totals are always recomputed through utils/billing.js so the customer bill,
+// invoice PDF and payment summary stay consistent.
+// ---------------------------------------------------------------------------
+
+const isAdminRequest = (req) => String(req.user?.role || '').toLowerCase() === 'admin';
+
+/** Load a booking by ObjectId or human bookingId, as a plain object. */
+const loadBookingForBilling = async (id) => {
+    const { default: Booking } = await import('../models/Booking.js');
+    const query = mongoose.Types.ObjectId.isValid(id) ? { _id: id } : { bookingId: id };
+    const booking = await Booking.findOne(query).lean();
+    return { Booking, query, booking };
+};
+
+/**
+ * Admins may correct a bill at any time. Employees may only change their own
+ * booking, and only before the invoice is finalised (paid/completed/cancelled).
+ * Returns null when allowed, or { code, message } when denied.
+ */
+const denyExtraServiceChange = (booking, req) => {
+    if (isAdminRequest(req)) return null;
+
+    const techId = booking.assignedTo?.technicianId?._id || booking.assignedTo?.technicianId;
+    const candidates = [req.user?.id, req.user?.userId, req.user?._id]
+        .filter(Boolean)
+        .map(String);
+
+    if (techId && !candidates.includes(String(techId))) {
+        return { code: 403, message: 'You are not assigned to this booking.' };
+    }
+
+    const status = String(booking.status || '').toLowerCase();
+    if (booking.payment?.status === 'paid' || status === 'completed') {
+        return {
+            code: 409,
+            message: 'This invoice is already finalised. Extra services can no longer be changed.'
+        };
+    }
+    if (status === 'cancelled') {
+        return { code: 409, message: 'This booking is cancelled.' };
+    }
+    return null;
+};
+
+/** Persist a new extra-services array and its recomputed totals. */
+const saveExtras = async (Booking, query, booking, nextExtras) => {
+    const billing = computeBilling(booking, { extraServices: nextExtras });
+    const updated = await Booking.findOneAndUpdate(
+        query,
+        { $set: { extraServices: nextExtras, billing, updatedAt: new Date() } },
+        { new: true }
+    ).lean();
+
+    return {
+        bookingId: updated?.bookingId,
+        extraServices: updated?.extraServices || [],
+        billing: updated?.billing || billing
+    };
+};
+
+// GET /:id/extra-services — list extras with current totals
+export const getExtraServices = async (req, res) => {
+    try {
+        const { booking } = await loadBookingForBilling(req.params.id);
+        if (!booking) return res.status(404).json({ message: 'Booking not found' });
+
+        res.json({
+            success: true,
+            bookingId: booking.bookingId,
+            extraServices: booking.extraServices || [],
+            // Recomputed on read so legacy bookings (saved before this feature)
+            // still return a correct breakdown without a migration.
+            billing: computeBilling(booking)
+        });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+};
+
+// POST /:id/extra-services — add one extra service
+export const addExtraService = async (req, res) => {
+    try {
+        const { Booking, query, booking } = await loadBookingForBilling(req.params.id);
+        if (!booking) return res.status(404).json({ message: 'Booking not found' });
+
+        const denied = denyExtraServiceChange(booking, req);
+        if (denied) return res.status(denied.code).json({ message: denied.message });
+
+        const line = normalizeExtraService(req.body);
+        if (!line.name) {
+            return res.status(400).json({ message: 'Service name is required.' });
+        }
+
+        const nextExtras = [
+            ...(booking.extraServices || []),
+            {
+                ...line,
+                addedBy: req.user?.id,
+                addedByRole: isAdminRequest(req) ? 'admin' : 'employee',
+                addedAt: new Date()
+            }
+        ];
+
+        const result = await saveExtras(Booking, query, booking, nextExtras);
+        res.status(201).json({ success: true, message: 'Extra service added', ...result });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+};
+
+// PUT /:id/extra-services/:extraId — edit an extra service
+export const updateExtraService = async (req, res) => {
+    try {
+        const { Booking, query, booking } = await loadBookingForBilling(req.params.id);
+        if (!booking) return res.status(404).json({ message: 'Booking not found' });
+
+        const denied = denyExtraServiceChange(booking, req);
+        if (denied) return res.status(denied.code).json({ message: denied.message });
+
+        const { extraId } = req.params;
+        const current = (booking.extraServices || []).find((e) => String(e._id) === String(extraId));
+        if (!current) return res.status(404).json({ message: 'Extra service not found' });
+
+        // Merge so callers can send a partial update.
+        const line = normalizeExtraService({
+            name: req.body.name ?? current.name,
+            quantity: req.body.quantity ?? current.quantity,
+            unitPrice: req.body.unitPrice ?? req.body.price ?? current.unitPrice,
+            notes: req.body.notes ?? current.notes
+        });
+        if (!line.name) return res.status(400).json({ message: 'Service name is required.' });
+
+        const nextExtras = (booking.extraServices || []).map((e) =>
+            String(e._id) === String(extraId) ? { ...e, ...line } : e
+        );
+
+        const result = await saveExtras(Booking, query, booking, nextExtras);
+        res.json({ success: true, message: 'Extra service updated', ...result });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+};
+
+// DELETE /:id/extra-services/:extraId — remove an extra service
+export const removeExtraService = async (req, res) => {
+    try {
+        const { Booking, query, booking } = await loadBookingForBilling(req.params.id);
+        if (!booking) return res.status(404).json({ message: 'Booking not found' });
+
+        const denied = denyExtraServiceChange(booking, req);
+        if (denied) return res.status(denied.code).json({ message: denied.message });
+
+        const { extraId } = req.params;
+        const nextExtras = (booking.extraServices || []).filter(
+            (e) => String(e._id) !== String(extraId)
+        );
+        if (nextExtras.length === (booking.extraServices || []).length) {
+            return res.status(404).json({ message: 'Extra service not found' });
+        }
+
+        const result = await saveExtras(Booking, query, booking, nextExtras);
+        res.json({ success: true, message: 'Extra service removed', ...result });
     } catch (err) {
         res.status(400).json({ error: err.message });
     }

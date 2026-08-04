@@ -20,6 +20,19 @@ const ALLOWED_TRANSITIONS = {
   rescheduled: ['confirmed']
 };
 
+// A single additional service performed during the appointment that was not
+// part of the original booking. Each entry becomes its own invoice line item.
+const extraServiceSchema = new mongoose.Schema({
+  name: { type: String, required: true, trim: true },
+  quantity: { type: Number, required: true, min: 1, default: 1 },
+  unitPrice: { type: Number, required: true, min: 0 },
+  amount: { type: Number, required: true, min: 0 }, // quantity * unitPrice
+  notes: { type: String, trim: true },
+  addedBy: { type: mongoose.Schema.Types.ObjectId },
+  addedByRole: { type: String, enum: ['employee', 'admin'] },
+  addedAt: { type: Date, default: Date.now }
+}, { _id: true });
+
 const bookingSchema = new mongoose.Schema({
   bookingId: {
     type: String,
@@ -44,6 +57,19 @@ const bookingSchema = new mongoose.Schema({
     price: { type: Number, required: true, min: 0 },
     duration: { type: Number, required: true, min: 15 }, // in minutes
     image: String
+  },
+  // Extra services added during the appointment (see extraServiceSchema above).
+  extraServices: { type: [extraServiceSchema], default: [] },
+  // Persisted invoice breakdown. ALWAYS written via utils/billing.js so the
+  // customer bill, invoice PDF and payment summary can never drift apart.
+  billing: {
+    baseAmount: { type: Number, min: 0, default: 0 },
+    extrasTotal: { type: Number, min: 0, default: 0 },
+    subtotal: { type: Number, min: 0, default: 0 },
+    discount: { type: Number, min: 0, default: 0 },
+    taxRate: { type: Number, min: 0, default: 0 },
+    taxAmount: { type: Number, min: 0, default: 0 },
+    grandTotal: { type: Number, min: 0, default: 0 }
   },
   schedule: {
     preferredDate: {

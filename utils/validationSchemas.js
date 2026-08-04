@@ -66,3 +66,26 @@ export const bookingSchemas = {
         })
     })
 };
+
+// Extra Service Schemas (additional charges added during an appointment)
+const extraServiceLine = {
+    name: Joi.string().trim().min(1).max(120),
+    quantity: Joi.number().integer().min(1),
+    unitPrice: Joi.number().min(0),
+    price: Joi.number().min(0), // accepted alias for unitPrice
+    notes: Joi.string().allow('').max(500)
+};
+
+export const extraServiceSchemas = {
+    // Charges must be >= 0 and a name is mandatory.
+    // NOTE: the quantity default lives here (not on the shared line) so that an
+    // empty update body stays empty and is correctly rejected by `.min(1)`.
+    create: Joi.object({
+        ...extraServiceLine,
+        name: extraServiceLine.name.required(),
+        quantity: extraServiceLine.quantity.default(1)
+    }).or('unitPrice', 'price'),
+
+    // Partial update — at least one field must be supplied.
+    update: Joi.object({ ...extraServiceLine }).min(1)
+};

@@ -15,6 +15,7 @@ import {
   updateBookingStatus,
   updateBooking,
   deleteBooking,
+  generateUserInvoice,
   // assignBooking // Use assignEmployee from bookingController which might wrap or be the one
 } from "../controllers/adminBooking.controller.js";
 
@@ -75,6 +76,10 @@ router.put("/user/:id", userAuth, updateUserBooking);
 router.post("/", userAuth, validateRequest(bookingSchemas.createBooking), createBooking);
 router.get("/", adminAuth, getAllBookings);
 router.get("/user/:userId", adminAuth, getUserBookings); // Admin viewing specific user
+// Customer-facing invoice. Declared before "/:id" for clarity. The controller
+// enforces that the requester owns the booking (or is an admin).
+router.get("/:id/invoice", userAuth, generateUserInvoice);
+
 router.get("/:id", getBookingById); // mixed auth handled in controller
 router.put("/:id/status", adminAuth, updateBookingStatus);
 router.put("/:id", adminAuth, updateBooking);

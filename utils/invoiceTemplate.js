@@ -1,3 +1,14 @@
+import { computeBilling } from './billing.js';
+
+/** Escape user-supplied text before embedding it in the invoice HTML. */
+const esc = (value) =>
+    String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+
 /**
  * Utility to generate a professional HTML invoice for bookings
  * Now includes automated PDF download functionality
@@ -16,8 +27,19 @@ export const generateInvoiceHTML = (booking) => {
         time = 'N/A',
         status = 'pending',
         paymentStatus = 'PENDING',
-        createdAt = new Date()
+        createdAt = new Date(),
+        extraServices = [],
+        billing = null
     } = booking;
+
+    const extras = Array.isArray(extraServices) ? extraServices : [];
+
+    // Totals always come from the shared calculator so the invoice can never
+    // disagree with the stored bill / payment summary. Persisted discount and
+    // tax rate are honoured; base + extras are taken from the current data.
+    const totals = computeBilling({ billing }, { baseAmount: price, extraServices: extras });
+
+    const currency = (n) => `₹${Math.round(Number(n) || 0).toLocaleString('en-IN')}`;
 
     const formattedDate = new Date(date).toLocaleDateString('en-IN', {
         year: 'numeric',
@@ -31,7 +53,6 @@ export const generateInvoiceHTML = (booking) => {
         day: 'numeric'
     });
 
-    const amountStr = `₹${Math.round(price).toLocaleString('en-IN')}`;
 
     return `
 <!DOCTYPE html>
@@ -242,23 +263,43 @@ export const generateInvoiceHTML = (booking) => {
                         <small style="color: #666">Professional home service provided by Homax</small>
                     </td>
                     <td>${category}</td>
-                    <td class="amount-col">${amountStr}</td>
-                </tr>
+                    <td class="amount-col">${currency(totals.baseAmount)}</td>
+                </tr>${extras.map((item) => `
+                <tr>
+                    <td>
+                        <strong>${esc(item.name)}</strong><span style="display:inline-block;margin-left:6px;padding:1px 7px;border-radius:10px;background:#e6f7f2;color:#0f9d76;font-size:11px;font-weight:600;">EXTRA</span><br>
+                        <small style="color: #666">${item.notes ? esc(item.notes) : 'Additional service performed during the visit'}${Number(item.quantity) > 1 ? ` &middot; ${Number(item.quantity)} × ${currency(item.unitPrice)}` : ''}</small>
+                    </td>
+                    <td>Extra Service</td>
+                    <td class="amount-col">${currency(item.amount)}</td>
+                </tr>`).join('')}
             </tbody>
         </table>
 
-        <div class="totals">
+        <div class="totals">${totals.extrasTotal > 0 ? `
             <div class="total-row">
-                <span>Subtotal</span>
-                <span>${amountStr}</span>
+                <span>Service Charges</span>
+                <span>${currency(totals.baseAmount)}</span>
             </div>
             <div class="total-row">
-                <span>Tax (0%)</span>
-                <span>₹0</span>
+                <span>Extra Services (${extras.length})</span>
+                <span>${currency(totals.extrasTotal)}</span>
+            </div>` : ''}
+            <div class="total-row">
+                <span>Subtotal</span>
+                <span>${currency(totals.subtotal)}</span>
+            </div>${totals.discount > 0 ? `
+            <div class="total-row">
+                <span>Discount</span>
+                <span>-${currency(totals.discount)}</span>
+            </div>` : ''}
+            <div class="total-row">
+                <span>Tax (${totals.taxRate}%)</span>
+                <span>${currency(totals.taxAmount)}</span>
             </div>
             <div class="total-row grand-total">
                 <span>Total Amount</span>
-                <span>${amountStr}</span>
+                <span>${currency(totals.grandTotal)}</span>
             </div>
         </div>
 

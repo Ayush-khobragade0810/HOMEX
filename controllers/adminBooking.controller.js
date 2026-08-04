@@ -92,6 +92,10 @@ const formatBookingResponse = (booking) => {
             booking.payment?.amount ||
             0,
 
+        // Extra services added on site + the recalculated invoice breakdown.
+        extraServices: booking.extraServices || [],
+        billing: booking.billing || null,
+
         // Add for frontend compatibility
         totalAmount:
             booking.price ||
@@ -609,18 +613,59 @@ export const assignBooking = async (req, res) => {
  * @route   GET /api/admin/bookings/:id/invoice
  * @access  Private/Admin
  */
+/**
+ * Build the invoice payload (shared by the admin and customer invoice routes)
+ * so both always render identical figures.
+ */
+const buildInvoiceData = (booking) => {
+    const formattedData = formatBookingResponse(booking);
+    formattedData.paymentStatus = booking.payment?.status || 'PENDING';
+    // Extra services + stored billing breakdown must reach the template so the
+    // invoice itemises additional charges and shows recalculated totals.
+    formattedData.extraServices = booking.extraServices || [];
+    formattedData.billing = booking.billing || null;
+    return formattedData;
+};
+
+/**
+ * @desc    Generate the invoice for the logged-in customer's OWN booking
+ * @route   GET /api/bookings/:id/invoice
+ * @access  Private (booking owner, or admin)
+ */
+export const generateUserInvoice = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const query = validateObjectId(id) ? { _id: id } : { bookingId: id };
+        const booking = await Booking.findOne(query).populate('userId').populate('serviceId').lean();
+        if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
+
+        // Ownership check — a customer may only download their own invoice.
+        const ownerId = String(booking.userId?._id || booking.userId || '');
+        const requesterId = String(req.user?._id || req.user?.id || '');
+        const isAdmin = String(req.user?.role || '').toLowerCase() === 'admin';
+
+        if (!isAdmin && (!ownerId || ownerId !== requesterId)) {
+            return res.status(403).json({
+                success: false,
+                message: 'You can only download invoices for your own bookings.'
+            });
+        }
+
+        res.setHeader('Content-Type', 'text/html');
+        res.send(generateInvoiceHTML(buildInvoiceData(booking)));
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Failed to generate invoice', error: error.message });
+    }
+};
+
 export const generateInvoice = async (req, res) => {
     try {
         const { id } = req.params;
         const booking = await Booking.findById(id).populate('userId').populate('serviceId').lean();
         if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
 
-        const formattedData = formatBookingResponse(booking);
-        formattedData.paymentStatus = booking.payment?.status || 'PENDING';
-        const html = generateInvoiceHTML(formattedData);
-
         res.setHeader('Content-Type', 'text/html');
-        res.send(html);
+        res.send(generateInvoiceHTML(buildInvoiceData(booking)));
     } catch (error) {
         res.status(500).json({ success: false, message: 'Failed to generate invoice', error: error.message });
     }

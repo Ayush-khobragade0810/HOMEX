@@ -56,9 +56,15 @@ import {
   getCustomerContact,
   updateServiceStatus,
   getServiceQuickActions,
-  rescheduleService
+  rescheduleService,
+  getExtraServices,
+  addExtraService,
+  updateExtraService,
+  removeExtraService
 } from '../controllers/serviceActionController.js';
 import { protect } from '../middleware/authMiddleware.js';
+import { validateRequest } from '../middleware/validate.js';
+import { extraServiceSchemas } from '../utils/validationSchemas.js';
 
 const router = express.Router();
 
@@ -79,6 +85,14 @@ router.put('/:id/complete', protect, completeService);
 router.put('/:id/accept', protect, acceptAssignment);
 router.put('/:id/status', protect, updateServiceStatus);
 router.put('/:id/reschedule', protect, rescheduleService);
+
+// Extra services (additional charges during an ongoing appointment).
+// Guarded by `protect`; the controller additionally enforces that only the
+// assigned employee (before the invoice is finalised) or an admin may modify.
+router.get('/:id/extra-services', protect, getExtraServices);
+router.post('/:id/extra-services', protect, validateRequest(extraServiceSchemas.create), addExtraService);
+router.put('/:id/extra-services/:extraId', protect, validateRequest(extraServiceSchemas.update), updateExtraService);
+router.delete('/:id/extra-services/:extraId', protect, removeExtraService);
 
 // Backward compatibility for PATCH
 router.patch('/:id/confirm', protect, confirmService);
