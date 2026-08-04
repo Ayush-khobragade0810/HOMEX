@@ -76,6 +76,10 @@ router.post("/add-state", async (req, res) => {
         });
 
         await newState.save();
+        // A new state affects the states list and the city list (which shows
+        // the state name).
+        cache.delete('master_states');
+        cache.delete('master_cities');
         res.status(201).json({
             message: "State added successfully",
             state: {
@@ -122,6 +126,8 @@ router.put("/:id", async (req, res) => {
             return res.status(404).json({ message: "State not found" });
         }
 
+        cache.delete('master_states');
+        cache.delete('master_cities');
         res.json({
             message: "State updated successfully",
             state: {
@@ -146,6 +152,8 @@ router.delete("/:id", async (req, res) => {
             return res.status(404).json({ message: "State not found" });
         }
 
+        cache.delete('master_states');
+        cache.delete('master_cities');
         res.json({ message: "State deleted successfully" });
     } catch (err) {
         res.status(500).json({ error: err.message });

@@ -80,6 +80,7 @@ router.post("/add-city", async (req, res) => {
         });
 
         await newCity.save();
+        cache.delete('master_cities');
         res.status(201).json({ message: "City added successfully", city: newCity });
     } catch (err) {
         if (err.code === 11000) {
@@ -108,6 +109,7 @@ router.put("/:id", async (req, res) => {
             return res.status(404).json({ message: "City not found" });
         }
 
+        cache.delete('master_cities');
         res.json({ message: "City updated successfully", city: updatedCity });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -123,6 +125,7 @@ router.delete("/:id", async (req, res) => {
             return res.status(404).json({ message: "City not found" });
         }
 
+        cache.delete('master_cities');
         res.json({ message: "City deleted successfully" });
     } catch (err) {
         res.status(500).json({ error: err.message });

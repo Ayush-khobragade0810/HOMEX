@@ -51,8 +51,13 @@ router.post("/add-country", async (req, res) => {
         });
 
         await newCountry.save();
-        res.status(201).json({ 
-            message: "Country added successfully", 
+        // Adding a country affects the countries list and the state/city lists
+        // (which display the country name), so refresh all three.
+        cache.delete('master_countries');
+        cache.delete('master_states');
+        cache.delete('master_cities');
+        res.status(201).json({
+            message: "Country added successfully",
             country: {
                 id: newCountry.countryId,
                 name: newCountry.countryName
@@ -92,8 +97,11 @@ router.put("/:id", async (req, res) => {
             return res.status(404).json({ message: "Country not found" });
         }
 
-        res.json({ 
-            message: "Country updated successfully", 
+        cache.delete('master_countries');
+        cache.delete('master_states');
+        cache.delete('master_cities');
+        res.json({
+            message: "Country updated successfully",
             country: {
                 id: updatedCountry.countryId,
                 name: updatedCountry.countryName
@@ -115,6 +123,9 @@ router.delete("/:id", async (req, res) => {
             return res.status(404).json({ message: "Country not found" });
         }
 
+        cache.delete('master_countries');
+        cache.delete('master_states');
+        cache.delete('master_cities');
         res.json({ message: "Country deleted successfully" });
     } catch (err) {
         res.status(500).json({ error: err.message });
