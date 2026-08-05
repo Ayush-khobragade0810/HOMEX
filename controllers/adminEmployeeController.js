@@ -252,7 +252,9 @@ export const createEmployee = async (req, res) => {
         const savedEmployee = await newEmployee.save();
         res.status(201).json(savedEmployee);
     } catch (err) {
-        res.status(400).json({ error: err.message });
+        // `message` as well as `error` — the client reads `message`, and without
+        // it a failed save surfaced in the UI as a bare "An error occurred."
+        res.status(400).json({ message: err.message, error: err.message });
     }
 };
 
@@ -306,7 +308,7 @@ export const updateEmployeeProfile = async (req, res) => {
         res.json(employee);
     } catch (err) {
         console.error("Update Profile Error:", err);
-        res.status(400).json({ error: err.message });
+        res.status(400).json({ message: err.message, error: err.message });
     }
 };
 

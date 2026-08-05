@@ -7,6 +7,19 @@ const router = express.Router();
 
 const AREAS_CACHE_KEY = "master_areas";
 
+// Single serialisation shape for areas, so GET / POST / PUT all hand the client
+// the same fields (notably `id`, which callers store as employee.areaId).
+const serializeArea = (a) => ({
+    id: a._id,
+    _id: a._id,
+    areaName: a.areaName,
+    city: a.city,
+    state: a.state,
+    country: a.country,
+    pincode: a.pincode || "",
+    description: a.description || ""
+});
+
 /**
  * Area master CRUD (admin).
  *
@@ -27,16 +40,7 @@ router.get("/", async (req, res) => {
 
         const areas = await Area.find().sort({ areaName: 1 }).lean();
 
-        const data = areas.map((a) => ({
-            id: a._id,
-            _id: a._id,
-            areaName: a.areaName,
-            city: a.city,
-            state: a.state,
-            country: a.country,
-            pincode: a.pincode || "",
-            description: a.description || ""
-        }));
+        const data = areas.map(serializeArea);
 
         cache.set(AREAS_CACHE_KEY, data, 600000); // 10 minutes
         res.json(data);
@@ -68,7 +72,7 @@ router.post("/add-area", async (req, res) => {
         await newArea.save();
         cache.delete(AREAS_CACHE_KEY); // so the new area shows immediately
 
-        res.status(201).json({ message: "Area added successfully", area: newArea });
+        res.status(201).json({ message: "Area added successfully", area: serializeArea(newArea) });
     } catch (err) {
         if (err.code === 11000) {
             res.status(400).json({ message: "This area already exists in the selected city" });
@@ -107,7 +111,7 @@ router.put("/:id", async (req, res) => {
         }
 
         cache.delete(AREAS_CACHE_KEY);
-        res.json({ message: "Area updated successfully", area: updatedArea });
+        res.json({ message: "Area updated successfully", area: serializeArea(updatedArea) });
     } catch (err) {
         if (err.code === 11000) {
             res.status(400).json({ message: "This area already exists in the selected city" });

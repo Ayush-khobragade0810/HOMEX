@@ -14,7 +14,10 @@ const employeeSchema = new mongoose.Schema({
     countryId: { type: Number, required: true },
     stateId: { type: Number, required: true },
     cityId: { type: Number, required: true },
-    areaId: { type: Number, required: true },
+    // Areas are keyed by Mongo _id, not a numeric id — the Area model stores
+    // location as strings (areaName/city/state/country) and has no numeric key.
+    // Keep this a String so the _id returned by /api/areas can be stored here.
+    areaId: { type: String, required: true },
 
     // Fields added to match the frontend component's needs
     earnings: { type: Number, default: 0, required: true },
