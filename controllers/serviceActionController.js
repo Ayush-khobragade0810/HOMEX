@@ -270,7 +270,7 @@ const saveExtras = async (Booking, query, booking, nextExtras) => {
     const billing = computeBilling(booking, { extraServices: nextExtras });
     const updated = await Booking.findOneAndUpdate(
         query,
-        { $set: { extraServices: nextExtras, billing, updatedAt: new Date() } },
+        { $set: { extraServices: nextExtras, billing, 'payment.amount': billing.grandTotal, updatedAt: new Date() } },
         { new: true }
     ).lean();
 
