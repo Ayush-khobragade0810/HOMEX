@@ -174,6 +174,9 @@ export const completeService = async (req, res) => {
 
         // The employee records what was actually collected (which may include a
         // tip); fall back to the computed grand total when not supplied.
+        const denied = denyExtraServiceChange(existing, req);
+        if (denied) return res.status(denied.code).json({ message: denied.message });
+
         const collected =
             actualEarnings !== undefined && actualEarnings !== null && actualEarnings !== ''
                 ? Number(actualEarnings)
@@ -195,6 +198,80 @@ export const completeService = async (req, res) => {
         ).populate('userId').populate('assignedTo.technicianId');
 
         if (!booking) return res.status(404).json({ message: "Booking not found" });
+
+        // Payment integration: create/update payment record for employee earnings
+        try {
+            const employeeUser = booking.assignedTo?.technicianId;
+            let employeeRecord = null;
+            if (employeeUser) {
+                employeeRecord = await Employee.findOne({ email: employeeUser.email });
+            }
+
+            if (employeeRecord) {
+                const lastPayment = await Payment.findOne().sort({ paymentId: -1 });
+                const newPaymentId = lastPayment ? lastPayment.paymentId + 1 : 1001;
+
+                const earnings = collected;
+                const commissionRate = 30; // 30% default rate
+                const commission = Math.round(earnings * (commissionRate / 100) * 100) / 100;
+                const baseRate = Math.round((earnings - commission) * 100) / 100;
+
+                const durationHours = getBookingDuration(booking) / 60;
+
+                const paymentData = {
+                    paymentId: newPaymentId,
+                    empId: employeeRecord.empId,
+                    employee: employeeRecord._id,
+                    serviceId: booking.bookingId,
+                    customer: {
+                        name: booking.contactIdInfo?.fullName || booking.contactInfo?.fullName || booking.userId?.name || 'Customer',
+                        email: booking.contactIdInfo?.email || booking.contactInfo?.email || booking.userId?.email || '',
+                        phone: booking.contactIdInfo?.phoneNumber || booking.contactInfo?.phoneNumber || booking.userId?.phone || '',
+                        address: booking.location?.completeAddress || booking.location?.address || ''
+                    },
+                    serviceType: booking.serviceDetails?.title || 'Service',
+                    amount: earnings,
+                    commission: commission,
+                    commissionRate: commissionRate,
+                    baseRate: baseRate,
+                    hours: durationHours,
+                    date: new Date(),
+                    status: 'completed',
+                    paymentMethod: booking.payment?.method || 'cash',
+                    transactionId: booking.payment?.transactionId || `TXN-${Date.now()}`
+                };
+
+                let payment = await Payment.findOne({ serviceId: booking.bookingId });
+                const oldAmount = payment ? (payment.status === 'completed' ? payment.baseRate : 0) : 0;
+
+                if (payment) {
+                    payment.amount = earnings;
+                    payment.commission = commission;
+                    payment.baseRate = baseRate;
+                    payment.hours = durationHours;
+                    payment.status = 'completed';
+                    payment.paymentMethod = booking.payment?.method || 'cash';
+                    await payment.save();
+                } else {
+                    payment = await Payment.create(paymentData);
+                }
+
+                // Update employee's wallet balance and earnings
+                const balanceDiff = baseRate - oldAmount;
+                employeeRecord.walletBalance = (employeeRecord.walletBalance || 0) + balanceDiff;
+                employeeRecord.earnings = (employeeRecord.earnings || 0) + balanceDiff;
+                await employeeRecord.save();
+            }
+        } catch (err) {
+            console.error("Error creating/updating payment record:", err);
+        }
+
+        // Remove from Upcoming Payments
+        try {
+            await UpcomingPayment.findOneAndDelete({ serviceId: booking.bookingId });
+        } catch (err) {
+            console.error("Error deleting upcoming payment:", err);
+        }
 
         emitBookingUpdate(booking.bookingId, 'COMPLETED', booking.toObject());
         await Activity.create({

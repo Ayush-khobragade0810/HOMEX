@@ -6,16 +6,16 @@ class ExportService {
     async generateCSV(data) {
         try {
             const fields = [
-                { label: 'Payment ID', value: '_id' },
+                { label: 'Payment ID', value: 'paymentId' },
                 { label: 'Date', value: 'date' },
                 { label: 'Customer', value: 'customer.name' },
                 { label: 'Service Type', value: 'serviceType' },
                 { label: 'Hours', value: 'hours' },
                 { label: 'Hourly Rate', value: 'hourlyRate' },
-                { label: 'Base Amount', value: 'baseAmount' },
+                { label: 'Total Amount', value: 'amount' },
                 { label: 'Commission', value: 'commission' },
+                { label: 'Net Earnings', value: 'baseRate' },
                 { label: 'Bonus', value: 'bonus' },
-                { label: 'Total Amount', value: 'totalAmount' },
                 { label: 'Payment Method', value: 'paymentMethod' },
                 { label: 'Status', value: 'status' },
                 { label: 'Transaction ID', value: 'transactionId' },
@@ -75,21 +75,21 @@ class ExportService {
         // Simplified Excel generation (CSV-like or JSON)
         const headers = [
             'Payment ID', 'Date', 'Customer', 'Service Type', 'Hours',
-            'Hourly Rate', 'Base Amount', 'Commission', 'Bonus',
-            'Total Amount', 'Payment Method', 'Status', 'Transaction ID'
+            'Hourly Rate', 'Total Amount', 'Commission', 'Net Earnings', 'Bonus',
+            'Payment Method', 'Status', 'Transaction ID'
         ];
 
         const rows = data.map(payment => [
-            payment._id,
+            payment.paymentId || payment._id,
             new Date(payment.date).toISOString(),
             payment.customer?.name || 'N/A',
             payment.serviceType,
             payment.hours,
             payment.hourlyRate,
-            payment.baseAmount,
+            payment.amount,
             payment.commission,
+            payment.baseRate,
             payment.bonus,
-            payment.totalAmount,
             payment.paymentMethod,
             payment.status,
             payment.transactionId || '',

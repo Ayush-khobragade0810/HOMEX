@@ -44,6 +44,7 @@ import testRoutes from './routes/test.js';
 import notificationRoutes from './routes/notificationRoutes.js';
 import scheduleRoutes from './routes/scheduleRoutes.js';
 import paymentRoutes from './routes/paymentRoutes.js';
+import serviceDetailRoutes from './routes/serviceDetailRoutes.js';
 
 // Constants and App Setup
 const __filename = fileURLToPath(import.meta.url);
@@ -211,6 +212,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/employees', adminEmployeeRoutes);
 app.use('/api/services', serviceRoutes);
 app.use('/api/service-actions', serviceActionRoutes);
+app.use('/api/service-details', serviceDetailRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/schedule', scheduleRoutes);
 app.use('/api/payments', paymentRoutes);

@@ -3,23 +3,39 @@ import analyticsService from "../services/analyticsService.js";
 import exportService from "../services/exportService.js";
 import Payment from "../models/Payment.js"; // Kept for direct simple queries if needed
 import UpcomingPayment from "../models/UpcomingPayment.js"; // Kept for consistency
+import Employee from "../models/adminEmployee.js";
+import mongoose from "mongoose";
+
+const resolveNumericEmpId = async (idInput) => {
+    if (!idInput) return null;
+    const numericId = parseInt(idInput);
+    if (!isNaN(numericId) && String(numericId) === String(idInput)) {
+        return numericId;
+    }
+    if (mongoose.Types.ObjectId.isValid(idInput)) {
+        const emp = await Employee.findById(idInput).lean();
+        if (emp) return emp.empId;
+    }
+    return null;
+};
 
 // Get payment dashboard data for employee
 export const getPaymentDashboard = async (req, res) => {
     try {
-        const { empId } = req.params;
+        const { empId: rawEmpId } = req.params;
+        const empId = await resolveNumericEmpId(rawEmpId);
+        
+        if (!empId) {
+            return res.status(400).json({ error: "Invalid employee ID format or employee not found." });
+        }
+
+        // Security check: only allow admin or the logged-in employee themselves
+        if (req.user.role !== 'admin' && parseInt(req.user.empId) !== parseInt(empId)) {
+            return res.status(403).json({ error: "Access denied. You can only view your own payment dashboard." });
+        }
+
         // Delegate to service layer
         const dashboardData = await paymentService.getDashboardData(empId, req.query);
-
-        // Transform service response if necessary to match exact frontend expectation, 
-        // OR update frontend. The service response is quite comprehensive.
-        // Frontend likely expects: { payments, upcomingPayments, stats, paymentMethods }
-        // The service returns exactly this structure.
-
-        // Enhancing stats with 'totalServices' if missing from service logic (it was in old controller)
-        // Old controller counted 'completedServices' from Service model.
-        // New service logic counts 'completedCount' from Payment model. 
-        // Assuming Payments are created for every completed Service, this should be consistent.
 
         res.json(dashboardData);
     } catch (err) {
@@ -30,14 +46,24 @@ export const getPaymentDashboard = async (req, res) => {
 // Get filtered payments
 export const getFilteredPayments = async (req, res) => {
     try {
-        const { empId } = req.params;
+        const { empId: rawEmpId } = req.params;
+        const empId = await resolveNumericEmpId(rawEmpId);
+
+        if (!empId) {
+            return res.status(400).json({ error: "Invalid employee ID format or employee not found." });
+        }
+
+        // Security check
+        if (req.user.role !== 'admin' && parseInt(req.user.empId) !== parseInt(empId)) {
+            return res.status(403).json({ error: "Access denied. You can only view your own payments." });
+        }
+
         const { timeFilter, statusFilter } = req.query;
 
         // Reuse export logic which supports filtering, or basic find
         // Creating a filter object compatible with paymentService
         const filters = {
             status: statusFilter !== 'all' ? statusFilter : undefined
-            // timeFilter logic needs mapping if service expects specific ranges or just dates
         };
 
         // Mapping old 'timeFilter' (week, month, year) to service 'timeRange'
@@ -54,18 +80,16 @@ export const getFilteredPayments = async (req, res) => {
 export const getPaymentById = async (req, res) => {
     try {
         const { id } = req.params;
-        // Check if ID is likely MongoID or custom numeric ID
-        // Service expects ObjectId usually but I adapted it to use query.
-        // Old controller search by 'paymentId' (Number).
-        // New service getPaymentById uses _id (ObjectId).
-        // I need to be careful here.
-        // Let's keep the old logic for numeric IDs or update service.
-        // Old: Payment.findOne({ paymentId: parseInt(id) })
 
         const payment = await Payment.findOne({ paymentId: parseInt(id) });
 
         if (!payment) {
             return res.status(404).json({ message: "Payment not found" });
+        }
+
+        // Security check
+        if (req.user.role !== 'admin' && parseInt(req.user.empId) !== parseInt(payment.empId)) {
+            return res.status(403).json({ error: "Access denied. You can only view your own payments." });
         }
 
         res.json(payment);
@@ -136,12 +160,19 @@ export const updatePaymentStatus = async (req, res) => {
 // Get earnings statistics
 export const getEarningsStatistics = async (req, res) => {
     try {
-        const { empId } = req.params;
-        const { period = 'month' } = req.query; // month, year, week
+        const { empId: rawEmpId } = req.params;
+        const empId = await resolveNumericEmpId(rawEmpId);
 
-        // Map period to service expectation
-        // Service 'getMonthlyAnalytics' returns last N months.
-        // Original endpoint logic returned aggregation based on period.
+        if (!empId) {
+            return res.status(400).json({ error: "Invalid employee ID format or employee not found." });
+        }
+
+        // Security check
+        if (req.user.role !== 'admin' && parseInt(req.user.empId) !== parseInt(empId)) {
+            return res.status(403).json({ error: "Access denied. You can only view your own statistics." });
+        }
+
+        const { period = 'month' } = req.query; // month, year, week
 
         if (period === 'month') {
             const stats = await analyticsService.getMonthlyAnalytics(empId, 6); // Default to 6 months
@@ -150,8 +181,6 @@ export const getEarningsStatistics = async (req, res) => {
             const stats = await analyticsService.getYearlySummary(empId, new Date().getFullYear());
             res.json(stats);
         } else {
-            // Fallback to simpler aggregation for week or legacy support
-            // Or rely on dashboard stats which has weekly growth
             const stats = await analyticsService.getMonthlyAnalytics(empId, 1);
             res.json(stats);
         }
@@ -163,12 +192,25 @@ export const getEarningsStatistics = async (req, res) => {
 // Export payments data
 export const exportPayments = async (req, res) => {
     try {
-        const { empId } = req.params;
-        const { format = 'json', startDate, endDate } = req.query;
+        const { empId: rawEmpId } = req.params;
+        const empId = await resolveNumericEmpId(rawEmpId);
+
+        if (!empId) {
+            return res.status(400).json({ error: "Invalid employee ID format or employee not found." });
+        }
+
+        // Security check
+        if (req.user.role !== 'admin' && parseInt(req.user.empId) !== parseInt(empId)) {
+            return res.status(403).json({ error: "Access denied. You can only export your own payments." });
+        }
+
+        const { format = 'json', startDate, endDate, timeFilter, statusFilter } = req.query;
 
         const filters = {};
         if (startDate) filters.startDate = startDate;
         if (endDate) filters.endDate = endDate;
+        if (timeFilter) filters.timeRange = timeFilter;
+        if (statusFilter) filters.status = statusFilter;
 
         const payments = await paymentService.exportPayments(empId, format, filters);
 
@@ -179,8 +221,7 @@ export const exportPayments = async (req, res) => {
             res.setHeader('Content-Disposition', `attachment; filename=payments-${empId}.csv`);
             res.send(csvData);
         } else if (format === 'pdf') {
-            // Mock employee info - ideally fetch from Employee model
-            const employeeInfo = { name: "Employee", employeeId: empId };
+            const employeeInfo = { name: req.user.name || "Employee", employeeId: empId };
             const pdfBuffer = await exportService.generatePDF(payments, employeeInfo);
 
             res.setHeader('Content-Type', 'application/pdf');
@@ -197,7 +238,18 @@ export const exportPayments = async (req, res) => {
 // Request Withdrawal
 export const requestWithdrawal = async (req, res) => {
     try {
-        const { empId } = req.params;
+        const { empId: rawEmpId } = req.params;
+        const empId = await resolveNumericEmpId(rawEmpId);
+
+        if (!empId) {
+            return res.status(400).json({ error: "Invalid employee ID format or employee not found." });
+        }
+
+        // Security check
+        if (req.user.role !== 'admin' && parseInt(req.user.empId) !== parseInt(empId)) {
+            return res.status(403).json({ error: "Access denied. You can only request withdrawal for yourself." });
+        }
+
         const { amount, methodData } = req.body;
 
         const withdrawal = await paymentService.requestWithdrawal(empId, amount, methodData);
@@ -210,7 +262,18 @@ export const requestWithdrawal = async (req, res) => {
 // Add Payment Method
 export const addPaymentMethod = async (req, res) => {
     try {
-        const { empId } = req.params;
+        const { empId: rawEmpId } = req.params;
+        const empId = await resolveNumericEmpId(rawEmpId);
+
+        if (!empId) {
+            return res.status(400).json({ error: "Invalid employee ID format or employee not found." });
+        }
+
+        // Security check
+        if (req.user.role !== 'admin' && parseInt(req.user.empId) !== parseInt(empId)) {
+            return res.status(403).json({ error: "Access denied. You can only manage payment methods for yourself." });
+        }
+
         const methodData = req.body; // Expects full object
 
         const methods = await paymentService.addPaymentMethod(empId, methodData);
@@ -223,7 +286,18 @@ export const addPaymentMethod = async (req, res) => {
 // Get Payment Methods
 export const getPaymentMethods = async (req, res) => {
     try {
-        const { empId } = req.params;
+        const { empId: rawEmpId } = req.params;
+        const empId = await resolveNumericEmpId(rawEmpId);
+
+        if (!empId) {
+            return res.status(400).json({ error: "Invalid employee ID format or employee not found." });
+        }
+
+        // Security check
+        if (req.user.role !== 'admin' && parseInt(req.user.empId) !== parseInt(empId)) {
+            return res.status(403).json({ error: "Access denied. You can only view your own payment methods." });
+        }
+
         const methods = await paymentService.getEmployeePaymentMethods(empId);
         res.json(methods);
     } catch (err) {

@@ -2,6 +2,8 @@ import Payment from '../models/Payment.js';
 import UpcomingPayment from '../models/UpcomingPayment.js';
 import Withdrawal from '../models/Withdrawal.js';
 import Employee from '../models/adminEmployee.js'; // Ensure correct path to Employee model
+import Booking from '../models/Booking.js';
+import mongoose from 'mongoose';
 import { startOfDay, endOfDay, subDays, subMonths, format } from 'date-fns';
 
 class PaymentService {
@@ -11,6 +13,62 @@ class PaymentService {
         try {
             const { timeRange = 'all', status = 'all' } = filters;
             const empId = parseInt(employeeId);
+
+            // Auto-heal/sync missing payment documents for completed bookings
+            const empDoc = await Employee.findOne({ empId: empId });
+            if (empDoc) {
+                const completedBookings = await Booking.find({
+                    $or: [
+                        { 'assignedTo.technicianId': empDoc._id },
+                        { assignedTo: empDoc._id }
+                    ],
+                    status: { $regex: /completed/i }
+                }).lean();
+
+                for (const booking of completedBookings) {
+                    const existingPayment = await Payment.findOne({ serviceId: booking.bookingId });
+                    if (!existingPayment) {
+                        const lastPayment = await Payment.findOne().sort({ paymentId: -1 });
+                        const newPaymentId = lastPayment ? lastPayment.paymentId + 1 : 1001;
+
+                        const collected = booking.payment?.amount || booking.billing?.grandTotal || booking.serviceDetails?.price || 0;
+                        const commissionRate = 30;
+                        const commission = Math.round(collected * (commissionRate / 100) * 100) / 100;
+                        const baseRate = Math.round((collected - commission) * 100) / 100;
+                        const durationHours = ((booking.serviceDetails?.duration || 60) / 60) || 1;
+
+                        const paymentData = {
+                            paymentId: newPaymentId,
+                            empId: empDoc.empId,
+                            employee: empDoc._id,
+                            serviceId: booking.bookingId,
+                            customer: {
+                                    name: booking.contactIdInfo?.fullName || booking.contactInfo?.fullName || booking.userId?.name || 'Customer',
+                                    email: booking.contactIdInfo?.email || booking.contactInfo?.email || booking.userId?.email || '',
+                                    phone: booking.contactIdInfo?.phoneNumber || booking.contactInfo?.phoneNumber || booking.userId?.phone || '',
+                                    address: booking.location?.completeAddress || booking.location?.address || ''
+                            },
+                            serviceType: booking.serviceDetails?.title || 'Service',
+                            amount: collected,
+                            commission: commission,
+                            commissionRate: commissionRate,
+                            baseRate: baseRate,
+                            hours: durationHours,
+                            date: booking.completedAt || booking.updatedAt || new Date(),
+                            status: 'completed',
+                            paymentMethod: booking.payment?.method || 'cash',
+                            transactionId: booking.payment?.transactionId || `TXN-${Date.now()}`
+                        };
+
+                        await Payment.create(paymentData);
+
+                        // Sync employee wallet Balance/earnings
+                        empDoc.walletBalance = (empDoc.walletBalance || 0) + baseRate;
+                        empDoc.earnings = (empDoc.earnings || 0) + baseRate;
+                        await empDoc.save();
+                    }
+                }
+            }
 
             // Build query
             let query = { empId: empId };
@@ -88,6 +146,10 @@ class PaymentService {
                 },
             ]);
 
+            // Calculate weekly growth (simplified)
+            const lastWeekEarnings = await this.getPeriodEarnings(empId, subDays(now, 14), subDays(now, 7));
+            const thisWeekEarnings = await this.getPeriodEarnings(empId, subDays(now, 7), now);
+
             const stats = {
                 totalEarnings: 0,
                 pendingAmount: 0,
@@ -100,6 +162,7 @@ class PaymentService {
                 totalHours: 0,
                 weeklyGrowth: 0,
                 monthlyTarget: 5000,
+                thisWeekEarnings: thisWeekEarnings || 0,
             };
 
             if (statsAggregation[0].completed.length > 0) {
@@ -116,10 +179,6 @@ class PaymentService {
                 stats.pendingAmount = pending.totalAmount || 0;
                 stats.pendingCount = pending.count || 0;
             }
-
-            // Calculate weekly growth (simplified)
-            const lastWeekEarnings = await this.getPeriodEarnings(empId, subDays(now, 14), subDays(now, 7));
-            const thisWeekEarnings = await this.getPeriodEarnings(empId, subDays(now, 7), now);
 
             if (lastWeekEarnings > 0) {
                 stats.weeklyGrowth = Math.round(((thisWeekEarnings - lastWeekEarnings) / lastWeekEarnings) * 100);
@@ -151,22 +210,62 @@ class PaymentService {
                 }
             });
 
-            // Get upcoming payments (from UpcomingPayment model to match system architecture)
-            // Note: Merging logic to include both 'pending' Payments and 'UpcomingPayment' records could be better,
-            // but for now, standard Homax flow uses UpcomingPayment for scheduled jobs.
-            const upcomingPayments = await UpcomingPayment.find({
+            // Query Bookings to get actual upcoming/pending payments for the employee
+            const employeeUser = await Employee.findOne({ empId });
+            let mappedUpcoming = [];
+
+            if (employeeUser) {
+                const bookings = await Booking.find({
+                    $or: [
+                        { 'assignedTo.technicianId': employeeUser._id },
+                        { assignedTo: employeeUser._id }
+                    ],
+                    status: { $in: ['ASSIGNED', 'assigned', 'ACCEPTED', 'CONFIRMED', 'IN_PROGRESS', 'NAVIGATING', 'STARTED', 'in_progress', 'scheduled', 'confirmed'] }
+                })
+                .populate('userId', 'name email phone')
+                .sort({ 'schedule.preferredDate': 1 })
+                .limit(5)
+                .lean();
+
+                mappedUpcoming = bookings.map(b => {
+                    const durationHours = (b.serviceDetails?.duration || 60) / 60;
+                    const estimatedAmount = b.billing?.grandTotal || b.serviceDetails?.price || 0;
+                    return {
+                        _id: b._id,
+                        upcomingId: b.bookingId,
+                        empId: empId,
+                        serviceId: b.bookingId,
+                        estimatedAmount: estimatedAmount,
+                        scheduledDate: b.schedule?.preferredDate,
+                        customer: {
+                            name: b.contactIdInfo?.fullName || b.contactInfo?.fullName || b.userId?.name || 'Guest',
+                            phone: b.contactIdInfo?.phoneNumber || b.userId?.phone || '',
+                            email: b.contactIdInfo?.email || b.userId?.email || ''
+                        },
+                        serviceType: b.serviceDetails?.title || 'Service',
+                        hours: durationHours,
+                        hourlyRate: durationHours > 0 ? estimatedAmount / durationHours : estimatedAmount,
+                        status: 'scheduled'
+                    };
+                });
+            }
+
+            // Fallback/merge with UpcomingPayment collection if any exist
+            const dbUpcoming = await UpcomingPayment.find({
                 empId: empId,
-                status: { $ne: 'completed' }, // Fetch scheduled/pending
+                status: { $ne: 'completed' },
             })
                 .sort({ scheduledDate: 1 })
                 .limit(5)
                 .lean();
 
+            const upcomingPayments = mappedUpcoming.length > 0 ? mappedUpcoming : dbUpcoming;
+
             // Get earnings trend (last 7 days)
             const earningsTrend = await this.getEarningsTrend(empId, 7);
 
             // Fetch Employee for wallet balance
-            const employee = await Employee.findOne({ empId });
+            const employee = employeeUser || await Employee.findOne({ empId });
             const walletBalance = employee?.walletBalance || 0;
 
             // Adjust stats to include wallet info
@@ -251,7 +350,7 @@ class PaymentService {
 
     async exportPayments(employeeId, format = 'csv', filters = {}) {
         try {
-            const { startDate, endDate, status } = filters;
+            const { startDate, endDate, status, timeRange } = filters;
             const empId = parseInt(employeeId);
 
             let query = { empId: empId };
@@ -265,6 +364,25 @@ class PaymentService {
                     $gte: new Date(startDate),
                     $lte: new Date(endDate),
                 };
+            } else if (timeRange) {
+                const now = new Date();
+                switch (timeRange) {
+                    case 'today':
+                        query.date = {
+                            $gte: startOfDay(now),
+                            $lte: endOfDay(now),
+                        };
+                        break;
+                    case 'week':
+                        query.date = { $gte: subDays(now, 7) };
+                        break;
+                    case 'month':
+                        query.date = { $gte: subMonths(now, 1) };
+                        break;
+                    case 'year':
+                        query.date = { $gte: subMonths(now, 12) };
+                        break;
+                }
             }
 
             const payments = await Payment.find(query)

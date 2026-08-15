@@ -11,18 +11,19 @@ import {
     addPaymentMethod,
     getPaymentMethods
 } from "../controllers/paymentController.js";
+import { protect } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
 
-router.get("/employee/:empId/dashboard", getPaymentDashboard);
-router.get("/employee/:empId/filter", getFilteredPayments);
-router.get("/employee/:empId/statistics", getEarningsStatistics);
-router.get("/employee/:empId/export", exportPayments);
-router.get("/employee/:empId/methods", getPaymentMethods); // New route
-router.post("/employee/:empId/withdraw", requestWithdrawal); // New route
-router.post("/employee/:empId/methods", addPaymentMethod); // New route
+router.get("/employee/:empId/dashboard", protect, getPaymentDashboard);
+router.get("/employee/:empId/filter", protect, getFilteredPayments);
+router.get("/employee/:empId/statistics", protect, getEarningsStatistics);
+router.get("/employee/:empId/export", protect, exportPayments);
+router.get("/employee/:empId/methods", protect, getPaymentMethods); // New route
+router.post("/employee/:empId/withdraw", protect, requestWithdrawal); // New route
+router.post("/employee/:empId/methods", protect, addPaymentMethod); // New route
 
-router.get("/:id", getPaymentById);
+router.get("/:id", protect, getPaymentById);
 router.post("/", createPayment);
 router.patch("/:id/status", updatePaymentStatus);
 

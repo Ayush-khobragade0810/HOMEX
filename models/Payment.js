@@ -18,8 +18,7 @@ const paymentSchema = new mongoose.Schema({
     },
     serviceType: {
         type: String,
-        required: true,
-        enum: ['Plumbing', 'AC Repair', 'Appliance Repair', 'Drain Cleaning', 'Electrical', 'Emergency Plumbing', 'cleaning', 'repair', 'maintenance', 'consultation', 'installation', 'other']
+        required: true
     },
 
     // Financials

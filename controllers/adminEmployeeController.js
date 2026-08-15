@@ -223,6 +223,52 @@ export const getEmployeeProfile = async (req, res) => {
             await employee.save();
         }
 
+        // Count completed bookings dynamically
+        const completedBookings = await Booking.countDocuments({
+            $or: [
+                { 'assignedTo.technicianId': employee._id },
+                { assignedTo: employee._id }
+            ],
+            status: { $regex: /completed/i }
+        });
+
+        // Count legacy completed services dynamically
+        const { default: Service } = await import('../models/Service.js');
+        const completedServices = await Service.countDocuments({
+            empId: employee.empId,
+            status: { $regex: /completed/i }
+        });
+
+        const totalCompletedJobs = completedBookings + completedServices;
+
+        // Calculate dynamic total earnings
+        const bookingsList = await Booking.find({
+            $or: [
+                { 'assignedTo.technicianId': employee._id },
+                { assignedTo: employee._id }
+            ],
+            status: { $regex: /completed/i }
+        }).lean();
+
+        let dynamicEarnings = 0;
+        bookingsList.forEach(b => {
+            const basePrice = b.serviceDetails?.price || b.payment?.amount || 0;
+            const extraServices = b.extraServices || [];
+            const extrasTotal = b.billing?.extrasTotal ||
+                extraServices.reduce((sum, ex) => sum + (ex.amount || 0), 0) || 0;
+            const totalPrice = b.billing?.grandTotal ||
+                (extrasTotal > 0 ? basePrice + extrasTotal : basePrice);
+            dynamicEarnings += totalPrice;
+        });
+
+        const servicesList = await Service.find({
+            empId: employee.empId,
+            status: { $regex: /completed/i }
+        }).lean();
+        servicesList.forEach(s => {
+            dynamicEarnings += (s.actualEarnings || s.estimatedEarnings || 0);
+        });
+
         const profile = {
             id: employee.empId,
             _id: employee._id,
@@ -230,7 +276,7 @@ export const getEmployeeProfile = async (req, res) => {
             email: employee.email,
             phone: employee.phone,
             role: employee.role,
-            earnings: employee.earnings || 0,
+            earnings: dynamicEarnings || employee.earnings || 0,
             avatar: employee.avatar || 'DP',
             joinDate: employee.joinDate,
             bio: employee.bio || "",
@@ -238,8 +284,11 @@ export const getEmployeeProfile = async (req, res) => {
             certifications: employee.certifications || [],
             address: employee.address || "",
             rating: employee.rating || 0,
-            completedJobs: employee.completedJobs || 0,
-            statistics: employee.statistics || { totalEarnings: 0, hoursWorked: 0 }
+            completedJobs: totalCompletedJobs,
+            statistics: {
+                totalEarnings: dynamicEarnings || (employee.statistics?.totalEarnings) || 0,
+                hoursWorked: employee.statistics?.hoursWorked || 0
+            }
         };
 
         res.json(profile);
