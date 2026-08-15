@@ -52,8 +52,6 @@ router.post('/fix-role', async (req, res) => {
 
 // Debug endpoint to check token and permissions
 router.get('/check-auth', (req, res) => {
-    console.log('🔍 DEBUG AUTH CHECK');
-    console.log('Headers:', req.headers);
     const authHeader = req.headers.authorization;
 
     if (!authHeader) {

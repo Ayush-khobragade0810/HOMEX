@@ -223,8 +223,6 @@ export const deactivateAccount = async (req, res) => {
 export const updateProfile = async (req, res) => {
   try {
     const { id } = req.params;
-    console.log(`👤 Update Profile Request for ID: ${id}`);
-    console.log('📦 Request Body:', req.body);
 
     const { empName, phone, address, bio, specialties, certifications, avatar, email } = req.body;
 
@@ -241,14 +239,12 @@ export const updateProfile = async (req, res) => {
     const employee = await Employee.findOne(query);
 
     if (!employee) {
-      console.log('❌ Employee not found');
       return res.status(404).json({ message: 'Employee not found' });
     }
 
     // Authorization check: User must be updating themselves (email matches token)
     // Note: usage of req.user.email from token is secure
     if (employee.email !== req.user.email) {
-      console.log(`⛔ Unauthorized: Token email ${req.user.email} != Target email ${employee.email}`);
       return res.status(403).json({ message: 'Not authorized to update this profile' });
     }
 
@@ -263,15 +259,11 @@ export const updateProfile = async (req, res) => {
     if (avatar) updateData.avatar = avatar;
     if (email) updateData.email = email; // Allow email update
 
-    console.log('📝 Update Data Prepared:', updateData);
-
     const updatedEmployee = await Employee.findOneAndUpdate(
       { _id: employee._id },
       { $set: updateData },
       { new: true, runValidators: false }
     );
-
-    console.log('✅ Profile Updated Successfully');
 
     // --- SYNC WITH USER MODEL (For Login) ---
     // Since login uses the User collection, we must sync changes (especially Email) 
@@ -286,7 +278,6 @@ export const updateProfile = async (req, res) => {
       const linkedUser = await User.findOne({ email: employee.email });
 
       if (linkedUser) {
-        console.log(`🔄 Syncing changes to User record (ID: ${linkedUser._id})...`);
         const userUpdates = {};
 
         // Map Employee fields to User fields
@@ -298,10 +289,8 @@ export const updateProfile = async (req, res) => {
 
         if (Object.keys(userUpdates).length > 0) {
           await User.findByIdAndUpdate(linkedUser._id, { $set: userUpdates });
-          console.log('✅ User record synced successfully');
         }
       } else {
-        console.warn('⚠️ Linked User record not found for sync. Login might be affected if email was changed.');
       }
     } catch (syncErr) {
       console.error('❌ Failed to sync with User model:', syncErr);

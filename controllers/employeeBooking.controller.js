@@ -4,6 +4,7 @@ import Booking from "../models/Booking.js";
 import Payment from "../models/Payment.js";
 import UpcomingPayment from "../models/UpcomingPayment.js";
 import Employee from "../models/adminEmployee.js";
+import { cache } from "../utils/helpers.js";
 
 const parseClockToMinutes = (value) => {
     if (!value) return null;
@@ -45,6 +46,35 @@ const getBookingDuration = (booking) =>
 
 // Helper for formatting response (duplicated from admin controller for independence)
 const formatBookingResponse = (booking) => {
+    let formattedLocation = null;
+
+    if (booking.location) {
+        let areaObj = null;
+
+        if (booking.location.area) {
+            if (typeof booking.location.area === 'object') {
+                areaObj = {
+                    _id: booking.location.area._id,
+                    area: booking.location.area.areaName || booking.location.area.name || "",
+                    areaName: booking.location.area.areaName || booking.location.area.name || "",
+                    city: booking.location.area.city || "",
+                    state: booking.location.area.state || "",
+                    country: booking.location.area.country || "",
+                    pincode: booking.location.area.pincode || ""
+                };
+            }
+        }
+
+        formattedLocation = {
+            area: areaObj || booking.location.area,
+            address: booking.location.completeAddress || booking.location.address || "",
+            completeAddress: booking.location.completeAddress || booking.location.address || "",
+            pincode: booking.location.pincode || (areaObj ? areaObj.pincode : ""),
+            landmark: booking.location.landmark || "",
+            coordinates: booking.location.coordinates || null
+        };
+    }
+
     return {
         _id: booking._id,
         bookingId: booking.bookingId,
@@ -69,8 +99,9 @@ const formatBookingResponse = (booking) => {
         currentStep: booking.statusTimeline?.[booking.statusTimeline.length - 1]?.status || 'PENDING',
 
         assignedTo: booking.assignedTo,
-        address: booking.location?.completeAddress || booking.address,
-        specialInstructions: booking.notes || booking.adminNotes
+        address: booking.location?.completeAddress || booking.location?.address || booking.address,
+        specialInstructions: booking.notes || booking.adminNotes,
+        location: formattedLocation
     };
 };
 
@@ -84,7 +115,7 @@ export const updateBookingStatus = async (req, res) => {
         const { status, notes } = req.body;
         const employeeId = req.user._id;
 
-        const booking = await Booking.findById(bookingId);
+        const booking = await Booking.findById(bookingId).populate('location.area');
         if (!booking) {
             return res.status(404).json({ success: false, error: 'Booking not found' });
         }
@@ -186,6 +217,7 @@ export const updateBookingStatus = async (req, res) => {
 
         await booking.save();
 
+        cache.clear();
         res.json({
             success: true,
             message: `Booking ${status.toLowerCase()} successfully`,

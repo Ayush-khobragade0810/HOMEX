@@ -451,6 +451,50 @@ export const rescheduleService = async (req, res) => {
     }
 };
 
+// Helper to build full address containing area, city, state, country
+const getFullAddress = (b) => {
+    if (!b) return '';
+    const loc = b.location;
+    if (!loc) return b.userId?.address || '';
+    const street = loc.completeAddress || loc.address || '';
+    if (loc.area && typeof loc.area === 'object') {
+        const areaName = loc.area.areaName || loc.area.name || '';
+        const city = loc.area.city || '';
+        const state = loc.area.state || '';
+        const country = loc.area.country || '';
+        const parts = [street, areaName, city, state, country].filter(Boolean);
+        return parts.join(', ');
+    }
+    return street || b.userId?.address || '';
+};
+
+// Helper to get structured location details for frontend compatibility
+const getFormattedLocation = (b) => {
+    if (!b || !b.location) return null;
+    let areaObj = null;
+    if (b.location.area) {
+        if (typeof b.location.area === 'object') {
+            areaObj = {
+                _id: b.location.area._id,
+                area: b.location.area.areaName || b.location.area.name || "",
+                areaName: b.location.area.areaName || b.location.area.name || "",
+                city: b.location.area.city || "",
+                state: b.location.area.state || "",
+                country: b.location.area.country || "",
+                pincode: b.location.area.pincode || ""
+            };
+        }
+    }
+    return {
+        area: areaObj || b.location.area,
+        address: b.location.completeAddress || b.location.address || "",
+        completeAddress: b.location.completeAddress || b.location.address || "",
+        pincode: b.location.pincode || (areaObj ? areaObj.pincode : ""),
+        landmark: b.location.landmark || "",
+        coordinates: b.location.coordinates || null
+    };
+};
+
 // Fetch List Endpoints (Optimized)
 export const getAssigned = async (req, res) => {
     try {
@@ -461,6 +505,7 @@ export const getAssigned = async (req, res) => {
         })
         .populate('userId', 'name phone address')
         .populate('serviceId', 'title category price duration')
+        .populate('location.area')
         .select('-history -metadata -technicianNotes')
         .sort({ 'schedule.preferredDate': 1 })
         .lean();
@@ -472,7 +517,7 @@ export const getAssigned = async (req, res) => {
             category: b.serviceDetails?.category || b.category || 'General',
             status: b.status.toLowerCase(),
             customer: b.contactIdInfo?.fullName || b.contactInfo?.fullName || b.userId?.name || 'Guest',
-            address: b.location?.completeAddress || b.userId?.address || '',
+            address: getFullAddress(b),
             landmark: b.location?.landmark || '',
             pincode: b.location?.pincode || '',
             customerPhone: b.contactIdInfo?.phoneNumber || b.contactInfo?.phoneNumber || b.userId?.phone || '',
@@ -480,7 +525,8 @@ export const getAssigned = async (req, res) => {
             scheduledDate: b.schedule?.preferredDate,
             time: b.schedule?.timeSlot || '09:00 AM',
             duration: getBookingDuration(b),
-            estimatedEarnings: b.serviceDetails?.price || 0
+            estimatedEarnings: b.serviceDetails?.price || 0,
+            location: getFormattedLocation(b)
         })));
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -496,6 +542,7 @@ export const getPending = async (req, res) => {
         })
         .populate('userId', 'name phone address')
         .populate('serviceId', 'title category')
+        .populate('location.area')
         .select('-history -metadata -technicianNotes')
         .sort({ createdAt: -1 })
         .lean();
@@ -507,13 +554,14 @@ export const getPending = async (req, res) => {
             category: b.serviceDetails?.category || 'General',
             status: 'pending',
             customer: b.contactIdInfo?.fullName || b.contactInfo?.fullName || b.userId?.name || 'Guest',
-            address: b.location?.completeAddress || 'No address',
+            address: getFullAddress(b) || 'No address',
             landmark: b.location?.landmark || '',
             pincode: b.location?.pincode || '',
             customerPhone: b.contactIdInfo?.phoneNumber || b.userId?.phone || '',
             alternatePhone: b.contactIdInfo?.alternatePhone || '',
             estimatedEarnings: b.serviceDetails?.price || 0,
-            duration: getBookingDuration(b)
+            duration: getBookingDuration(b),
+            location: getFormattedLocation(b)
         })));
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -529,6 +577,7 @@ export const getCompleted = async (req, res) => {
         })
         .populate('userId', 'name phone address')
         .populate('serviceId', 'title category')
+        .populate('location.area')
         .select('-history -metadata -technicianNotes')
         .sort({ updatedAt: -1 })
         .limit(50)
@@ -540,14 +589,15 @@ export const getCompleted = async (req, res) => {
             category: b.serviceDetails?.category || 'General',
             status: 'completed',
             customer: b.contactIdInfo?.fullName || b.contactInfo?.fullName || b.userId?.name || 'Guest',
-            address: b.location?.completeAddress || b.userId?.address || '',
+            address: getFullAddress(b),
             landmark: b.location?.landmark || '',
             pincode: b.location?.pincode || '',
             customerPhone: b.contactIdInfo?.phoneNumber || b.userId?.phone || '',
             alternatePhone: b.contactIdInfo?.alternatePhone || '',
             completedDate: b.completedAt || b.updatedAt,
             duration: getBookingDuration(b),
-            payment: b.payment?.amount || 0
+            payment: b.payment?.amount || 0,
+            location: getFormattedLocation(b)
         })));
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -564,7 +614,12 @@ export const getInProgress = async (req, res) => {
             Booking.find({
                 'assignedTo.technicianId': req.user.id,
                 status: { $in: ['IN_PROGRESS', 'NAVIGATING', 'STARTED', 'in_progress', 'en_route'] }
-            }).populate('userId', 'name phone address').populate('serviceId', 'title category duration price').select('-history -metadata').lean(),
+            })
+            .populate('userId', 'name phone address')
+            .populate('serviceId', 'title category duration price')
+            .populate('location.area')
+            .select('-history -metadata')
+            .lean(),
             numericEmpId ? Service.find({ empId: numericEmpId, status: { $regex: /progress|route|started/i } }).lean() : Promise.resolve([])
         ]);
 
@@ -572,20 +627,28 @@ export const getInProgress = async (req, res) => {
             id: b.bookingId, _id: b._id, serviceType: b.serviceDetails?.title || 'Service',
             category: b.serviceDetails?.category || 'General',
             status: 'in_progress', customer: b.contactIdInfo?.fullName || b.userId?.name || 'Guest',
-            address: b.location?.completeAddress || b.userId?.address || '',
+            address: getFullAddress(b),
             landmark: b.location?.landmark || '',
             pincode: b.location?.pincode || '',
             customerPhone: b.contactIdInfo?.phoneNumber || b.userId?.phone || '',
             alternatePhone: b.contactIdInfo?.alternatePhone || '',
             scheduledDate: b.schedule?.preferredDate, duration: getBookingDuration(b),
-            estimatedEarnings: b.serviceDetails?.price || 0
+            estimatedEarnings: b.serviceDetails?.price || 0,
+            location: getFormattedLocation(b)
         }));
 
         const mappedS = services.map(s => ({
             id: s.serviceId, _id: s._id, serviceType: s.serviceType || 'Service',
             status: 'in_progress', customer: s.customer?.name || 'Guest',
             address: s.customer?.address || '', customerPhone: s.customer?.phone || '',
-            scheduledDate: s.scheduledDate, duration: s.duration || 1, estimatedEarnings: s.estimatedEarnings || 0
+            scheduledDate: s.scheduledDate, duration: s.duration || 1, estimatedEarnings: s.estimatedEarnings || 0,
+            location: s.customer ? {
+                address: s.customer.address || '',
+                completeAddress: s.customer.address || '',
+                pincode: s.customer.pincode || '',
+                landmark: s.customer.landmark || '',
+                area: null
+            } : null
         }));
 
         res.json([...mappedB, ...mappedS]);

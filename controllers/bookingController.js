@@ -58,9 +58,6 @@ const calculateDurationFromTimeSlot = (timeSlot) => {
 // @route   POST /api/bookings
 // @access  Private
 export const createBooking = async (req, res) => {
-  console.log('🎯 [1] CREATE BOOKING STARTED');
-  console.log('📥 Request body:', JSON.stringify(req.body, null, 2));
-  console.log('👤 User:', req.user?.email);
 
   // Set explicit timeout for this request
   req.setTimeout(10000, () => {
@@ -68,7 +65,6 @@ export const createBooking = async (req, res) => {
   });
 
   try {
-    console.log('🔍 [2] Validating input...');
 
     const {
       serviceId,
@@ -82,12 +78,8 @@ export const createBooking = async (req, res) => {
     // Validate inputs
     // We allow serviceId to be missing if serviceDetails are fully provided (for custom/temp services)
     if ((!serviceId && !serviceDetails) || !schedule || !location || !payment) {
-      console.log('❌ [2A] Missing required fields');
       throw new Error('Missing required booking information');
     }
-
-    console.log('✅ [2] Validation passed');
-    console.log('⏰ [2B] Time slot being used:', schedule.timeSlot);
 
     // Validate time slot
     const slotValidation = await validateTimeSlot(schedule.preferredDate, schedule.timeSlot);
@@ -97,10 +89,6 @@ export const createBooking = async (req, res) => {
     const durationFromTimeSlot = calculateDurationFromTimeSlot(schedule.timeSlot);
 
     // Validate location by Area ID or manual name (Production-Level Fix)
-    console.log('🌍 [DEBUG] Incoming Payload:', JSON.stringify({ 
-      areaId: req.body.areaId, 
-      location: req.body.location 
-    }, null, 2));
 
     const targetAreaId = req.body.areaId || (location && location.areaId);
     const manualAreaName = req.body.areaName || (location && (location.areaName || location.area)) || req.body.area;
@@ -108,10 +96,7 @@ export const createBooking = async (req, res) => {
     const state = (location && location.state) || req.body.state;
     const city = (location && location.city) || req.body.city;
 
-    console.log('🔍 [DEBUG] Extracted:', { targetAreaId, manualAreaName, country, state, city });
-
     if (!targetAreaId && !manualAreaName) {
-      console.log('❌ [DEBUG] Validation Failed: No areaId and no manualAreaName');
       throw new Error("Area is required. Please select a valid location from the list or enter manually.");
     }
 
@@ -121,13 +106,11 @@ export const createBooking = async (req, res) => {
       try {
         areaDoc = await Area.findById(targetAreaId);
       } catch (e) {
-        console.warn('Invalid Area ID format:', targetAreaId);
       }
     }
 
     // Handle manual area entry if ID not found/provided
     if (!areaDoc && manualAreaName && country && state && city) {
-      console.log('🔍 Searching for manual area:', manualAreaName);
       areaDoc = await Area.findOne({
         areaName: { $regex: new RegExp(`^${manualAreaName.trim()}$`, 'i') },
         city: { $regex: new RegExp(`^${city.trim()}$`, 'i') },
@@ -136,7 +119,6 @@ export const createBooking = async (req, res) => {
       });
 
       if (!areaDoc) {
-        console.log('🆕 Creating new Master Area for manual entry...');
         areaDoc = await Area.create({
           areaName: manualAreaName.trim(),
           city: city.trim(),
@@ -157,8 +139,6 @@ export const createBooking = async (req, res) => {
       throw new Error('User ID could not be determined from authentication payload.');
     }
 
-    console.log('💾 [3] Creating booking object...');
-
     // Create booking object
     const bookingData = {
       userId: actualUserId,
@@ -175,7 +155,8 @@ export const createBooking = async (req, res) => {
       },
       location: {
         area: areaDoc._id,
-        address: location.completeAddress || location.address || ""
+        address: location.completeAddress || location.address || "",
+        completeAddress: location.completeAddress || location.address || ""
       },
       // Persist customer contact in schema-compatible field
       contactIdInfo: contactInfo || {
@@ -196,8 +177,6 @@ export const createBooking = async (req, res) => {
         ipAddress: req.ip
       }
     };
-
-    console.log('📝 [3A] Booking data prepared. Saving...');
 
     let booking;
     try {
@@ -220,14 +199,10 @@ export const createBooking = async (req, res) => {
       });
     }
 
-    console.log('✅ [3] Booking created successfully:', booking._id);
-
     // Update user stats (optional, catch error to not fail booking)
     User.findByIdAndUpdate(req.user._id, {
       $inc: { 'stats.totalBookings': 1 }
     }).catch(err => console.error('Error updating user stats:', err));
-
-    console.log('📤 [4] Sending response...');
 
     // Send notification (async, don't await blocking response)
     sendNotification(actualUserId, {
@@ -257,8 +232,6 @@ export const createBooking = async (req, res) => {
       booking
     };
 
-    console.log('📨 [4A] Response payload ready. Sending JSON.');
-
     // Ensure we return explicitly
     return res.status(201).json(response);
 
@@ -285,7 +258,6 @@ export const createBooking = async (req, res) => {
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   } finally {
-    console.log('🏁 [END] Create booking function completed');
   }
 };
 
@@ -298,6 +270,7 @@ export const getBooking = async (req, res) => {
       .populate('userId', 'name email phone avatar')
       .populate('assignedTo.technicianId', 'name phone avatar rating')
       .populate('serviceId')
+      .populate('location.area')
       .lean();
 
     if (!booking) {
@@ -305,6 +278,34 @@ export const getBooking = async (req, res) => {
         success: false,
         message: 'Booking not found'
       });
+    }
+
+    // Format location if populated
+    if (booking.location) {
+      let areaObj = null;
+
+      if (booking.location.area) {
+        if (typeof booking.location.area === 'object') {
+          areaObj = {
+            _id: booking.location.area._id,
+            area: booking.location.area.areaName || booking.location.area.name || "",
+            areaName: booking.location.area.areaName || booking.location.area.name || "",
+            city: booking.location.area.city || "",
+            state: booking.location.area.state || "",
+            country: booking.location.area.country || "",
+            pincode: booking.location.area.pincode || ""
+          };
+        }
+      }
+
+      booking.location = {
+        area: areaObj || booking.location.area,
+        address: booking.location.completeAddress || booking.location.address || "",
+        completeAddress: booking.location.completeAddress || booking.location.address || "",
+        pincode: booking.location.pincode || (areaObj ? areaObj.pincode : ""),
+        landmark: booking.location.landmark || "",
+        coordinates: booking.location.coordinates || null
+      };
     }
 
     // Authorization check
@@ -635,8 +636,6 @@ export const assignEmployee = async (req, res) => {
   try {
     const { id } = req.params;
     const { employeeId } = req.body;
-
-    console.log(`Assigning booking ${id} to employee ${employeeId}`);
 
     const booking = await Booking.findById(id);
     if (!booking) {

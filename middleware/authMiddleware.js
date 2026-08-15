@@ -29,15 +29,12 @@ export const protect = async (req, res, next) => {
       user = await User.findById(decoded.id);
 
       if (user) {
-        console.log(`🔐 Auth Middleware: Found User ${user._id} (${user.email}), linking to Employee...`);
       } else {
-        console.log(`🔐 Auth Middleware: User ${decoded.id} not found.`);
       }
 
       if (user) {
         // SELF-HEALING: Fix null role if token has valid role
         if ((!user.role || user.role === 'null') && decoded.role) {
-          console.log(`🔧 Auth Middleware: Auto-fixing null role for user ${user._id} to ${decoded.role} (Source: Token)`);
           user.role = decoded.role;
           try {
             await user.save();
@@ -52,19 +49,16 @@ export const protect = async (req, res, next) => {
             employee = await Employee.findOne({ email: user.email });
 
             if (!employee) {
-              console.warn(`⚠️ Auth Middleware: Link broken! User ${user.email} has no Employee match.`);
 
               // EMERGENCY FALLBACK: Try to find by Name
               const potentialMatch = await Employee.findOne({ empName: user.name });
 
               if (potentialMatch) {
-                console.log(`🔧 Auto-Link: Found Employee ${potentialMatch.empId} by name "${user.name}". Syncing emails...`);
                 user.email = potentialMatch.email;
                 await user.save();
                 employee = potentialMatch;
               } else {
                 // FIX: Auto-create Employee Record if missing (Fixes broken link issue)
-                console.log(`📝 Auth Middleware: Creating missing Employee record for ${user.email}`);
                 try {
                   employee = await Employee.create({
                     empName: user.name || "Employee",
@@ -82,7 +76,6 @@ export const protect = async (req, res, next) => {
                     completedJobs: 0,
                     avatar: user.name ? user.name.split(' ').map(n => n[0]).join('').toUpperCase() : 'EMP'
                   });
-                  console.log(`✅ Auto-created Employee record: ${employee.empId}`);
                 } catch (err) {
                   console.error("❌ Failed to auto-create employee in middleware:", err.message);
                   // We let it fall through; final check will handle the 401 if creation failed
@@ -99,7 +92,6 @@ export const protect = async (req, res, next) => {
     }
 
     if (!employee) {
-      console.log('⛔ Auth Middleware: Final check failed - Profile not found');
       return res.status(401).json({ message: 'User or Employee profile not found' });
     }
 

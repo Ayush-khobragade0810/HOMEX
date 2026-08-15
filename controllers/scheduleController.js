@@ -3,6 +3,64 @@ import Service from "../models/Service.js";
 import mongoose from "mongoose";
 import moment from "moment";
 
+const getFullAddress = (b) => {
+    if (!b) return '';
+    const loc = b.location;
+    if (!loc) return b.userId?.address || '';
+    const street = loc.completeAddress || loc.address || '';
+    if (loc.area && typeof loc.area === 'object') {
+        const areaName = loc.area.areaName || loc.area.name || '';
+        const city = loc.area.city || '';
+        const state = loc.area.state || '';
+        const country = loc.area.country || '';
+        const parts = [street, areaName, city, state, country].filter(Boolean);
+        return parts.join(', ');
+    }
+    return street || b.userId?.address || '';
+};
+
+const getServiceFullAddress = (s) => {
+    if (!s?.customer) return '';
+
+    const customer = s.customer;
+
+    const parts = [
+        customer.completeAddress || customer.address,
+        customer.areaName || customer.area?.areaName || customer.area?.name,
+        customer.city || customer.area?.city,
+        customer.state || customer.area?.state,
+        customer.country || customer.area?.country
+    ].filter(Boolean);
+
+    return [...new Set(parts)].join(', ');
+};
+
+const getFormattedLocation = (b) => {
+    if (!b || !b.location) return null;
+    let areaObj = null;
+    if (b.location.area) {
+        if (typeof b.location.area === 'object') {
+            areaObj = {
+                _id: b.location.area._id,
+                area: b.location.area.areaName || b.location.area.name || "",
+                areaName: b.location.area.areaName || b.location.area.name || "",
+                city: b.location.area.city || "",
+                state: b.location.area.state || "",
+                country: b.location.area.country || "",
+                pincode: b.location.area.pincode || ""
+            };
+        }
+    }
+    return {
+        area: areaObj || b.location.area,
+        address: b.location.completeAddress || b.location.address || "",
+        completeAddress: b.location.completeAddress || b.location.address || "",
+        pincode: b.location.pincode || (areaObj ? areaObj.pincode : ""),
+        landmark: b.location.landmark || "",
+        coordinates: b.location.coordinates || null
+    };
+};
+
 const getDateRangeForView = (view, dateInput, dateFilter) => {
     // agenda sub-filters mapping
     let effectiveView = view;
@@ -94,8 +152,6 @@ export const getSchedules = async (req, res) => {
         const employeeId = req.user.id; 
         const numericEmpId = req.user.empId;
 
-        console.log(`📡 [Schedule] View: ${view} | Ref: ${date} | Filter: ${dateFilter} | User: ${req.user.email}`);
-
         // --- QUERY 1: BOOKINGS (New System) ---
         const bookingStatuses = [
             'pending', 'PENDING', 'confirmed', 'CONFIRMED', 'assigned', 'ASSIGNED',
@@ -151,32 +207,59 @@ export const getSchedules = async (req, res) => {
 
         // --- EXECUTE ---
         const [bookings, services] = await Promise.all([
-            Booking.find(bookingQuery).populate('userId', 'name phone address location').lean(),
+            Booking.find(bookingQuery)
+                .populate('userId', 'name phone address location')
+                .populate('location.area')
+                .lean(),
             numericEmpId ? Service.find(serviceQuery).lean() : Promise.resolve([])
         ]);
 
         // --- MAP & MERGE ---
         let mappedBookings = bookings.map(booking => {
+            // Base price from serviceDetails
+            const basePrice = booking.serviceDetails?.price || booking.payment?.amount || 0;
+
+            // Extra services added during the job
+            const extraServices = booking.extraServices || [];
+            const extrasTotal = booking.billing?.extrasTotal ||
+                extraServices.reduce((sum, ex) => sum + (ex.amount || 0), 0) || 0;
+
+            // Final total: use billing.grandTotal if available, otherwise base + extras
+            const totalPrice = booking.billing?.grandTotal ||
+                (extrasTotal > 0 ? basePrice + extrasTotal : basePrice);
+
             return {
                 _id: booking._id,
                 serviceId: booking.bookingId,
                 bookingId: booking.bookingId,
                 status: booking.status,
-                scheduledDate: booking.status?.toUpperCase() === 'COMPLETED' 
+                scheduledDate: booking.status?.toUpperCase() === 'COMPLETED'
                     ? (booking.completedAt || booking.schedule?.preferredDate || booking.createdAt)
                     : (booking.schedule?.preferredDate || booking.completedAt || booking.createdAt),
                 time: booking.schedule?.timeSlot || booking.time || '09:00 AM',
                 serviceName: booking.serviceDetails?.title || 'Service',
                 serviceType: booking.serviceDetails?.category || 'General',
                 duration: booking.serviceDetails?.duration || 60,
-                estimatedEarnings: booking.serviceDetails?.price || 0,
+                // Always send both base and updated total
+                estimatedEarnings: basePrice,
+                totalPrice,
+                extrasTotal,
+                hasExtras: extraServices.length > 0,
+                extraServices: extraServices.map(ex => ({
+                    name: ex.name,
+                    quantity: ex.quantity,
+                    unitPrice: ex.unitPrice,
+                    amount: ex.amount
+                })),
+                billing: booking.billing || null,
                 customer: {
                     name: booking.userId?.name || booking.contactIdInfo?.fullName || 'Customer',
                     phone: booking.userId?.phone || booking.contactIdInfo?.phoneNumber,
-                    address: booking.location?.address || booking.userId?.location?.address || 'No address'
+                    address: getFullAddress(booking)
                 },
                 notes: booking.notes,
-                source: 'booking'
+                source: 'booking',
+                location: getFormattedLocation(booking)
             };
         });
 
@@ -200,10 +283,28 @@ export const getSchedules = async (req, res) => {
                 customer: {
                     name: s.customer?.name || 'Customer',
                     phone: s.customer?.phone,
-                    address: s.customer?.address || 'No address'
+                    address: getServiceFullAddress(s) || 'No address'
                 },
                 notes: s.notes,
-                source: 'service'
+                source: 'service',
+                location: s.customer ? {
+                    area: s.customer.area
+                        ? {
+                            _id: s.customer.area?._id || s.customer.area,
+                            area: s.customer.areaName || s.customer.area?.areaName || s.customer.area?.name || '',
+                            areaName: s.customer.areaName || s.customer.area?.areaName || s.customer.area?.name || '',
+                            city: s.customer.city || s.customer.area?.city || '',
+                            state: s.customer.state || s.customer.area?.state || '',
+                            country: s.customer.country || s.customer.area?.country || '',
+                            pincode: s.customer.pincode || s.customer.area?.pincode || ''
+                        }
+                        : null,
+                    address: s.customer.completeAddress || s.customer.address || '',
+                    completeAddress: s.customer.completeAddress || s.customer.address || '',
+                    pincode: s.customer.pincode || '',
+                    landmark: s.customer.landmark || '',
+                    coordinates: s.customer.coordinates || null
+                } : null
             };
         });
 
@@ -242,6 +343,9 @@ export const getSchedules = async (req, res) => {
             if (['IN_PROGRESS', 'STARTED', 'NAVIGATING'].includes(s)) stats.in_progress++;
             if (['COMPLETED'].includes(s)) stats.completed++;
             if (['CANCELLED'].includes(s)) stats.cancelled++;
+        });
+
+        combined.forEach(item => {
         });
 
         res.status(200).json({

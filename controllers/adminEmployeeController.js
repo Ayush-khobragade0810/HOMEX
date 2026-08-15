@@ -10,7 +10,6 @@ import { cache } from "../utils/helpers.js";
  */
 export const searchEmployees = async (req, res) => {
     try {
-        console.log("SEARCH EMPLOYEES: Attempting to find employees...");
 
         // Build query based on status param
         const query = {};
@@ -24,12 +23,10 @@ export const searchEmployees = async (req, res) => {
         const cacheKey = `employees_list_${statusFilter || 'all'}`;
         const cachedResults = cache.get(cacheKey);
         if (cachedResults) {
-            console.log("🚀 Serving employees list from cache");
             return res.json(cachedResults);
         }
 
         const employees = await Employee.find(query).select('-avatar').lean();
-        console.log(`SEARCH EMPLOYEES: Found ${employees.length} records.`);
         if (employees.length === 0) {
             cache.set(cacheKey, [], 30000); // Cache empty result for 30s
             return res.json([]);
@@ -72,6 +69,40 @@ export const searchEmployees = async (req, res) => {
                         _id: "$assignedTo.technicianId", 
                         latestTask: { $first: "$$ROOT" } 
                     } 
+                },
+                {
+                    $lookup: {
+                        from: "areas",
+                        localField: "latestTask.location.area",
+                        foreignField: "_id",
+                        as: "areaInfo"
+                    }
+                },
+                {
+                    $unwind: {
+                        path: "$areaInfo",
+                        preserveNullAndEmptyArrays: true
+                    }
+                },
+                {
+                    $project: {
+                        _id: 1,
+                        latestTask: {
+                            $mergeObjects: [
+                                "$latestTask",
+                                {
+                                    location: {
+                                        area: "$areaInfo",
+                                        address: "$latestTask.location.address",
+                                        completeAddress: "$latestTask.location.completeAddress",
+                                        pincode: "$latestTask.location.pincode",
+                                        landmark: "$latestTask.location.landmark",
+                                        coordinates: "$latestTask.location.coordinates"
+                                    }
+                                }
+                            ]
+                        }
+                    }
                 }
             ])
         ]);
@@ -108,6 +139,10 @@ export const searchEmployees = async (req, res) => {
                 stateId: emp.stateId,
                 cityId: emp.cityId,
                 areaId: emp.areaId,
+                address: emp.address || "",
+                bio: emp.bio || "",
+                specialties: emp.specialties || [],
+                certifications: emp.certifications || [],
                 currentTask: currentTask ? {
                     bookingId: currentTask.bookingId,
                     serviceName: currentTask.serviceDetails?.title || currentTask.serviceName || "Service",
@@ -116,7 +151,20 @@ export const searchEmployees = async (req, res) => {
                     customerPhone: currentTask.contactIdInfo?.phoneNumber || currentTask.contactInfo?.phoneNumber || "N/A",
                     date: currentTask.schedule?.preferredDate,
                     time: currentTask.schedule?.timeSlot,
-                    location: currentTask.location?.completeAddress || currentTask.location?.address || "N/A"
+                    location: {
+                        area: currentTask.location?.area || null,
+                        address:
+                            currentTask.location?.completeAddress ||
+                            currentTask.location?.address ||
+                            '',
+                        completeAddress:
+                            currentTask.location?.completeAddress ||
+                            currentTask.location?.address ||
+                            '',
+                        pincode: currentTask.location?.pincode || '',
+                        landmark: currentTask.location?.landmark || '',
+                        coordinates: currentTask.location?.coordinates || null
+                    }
                 } : null
             };
         });
@@ -146,7 +194,6 @@ export const searchEmployees = async (req, res) => {
  */
 export const getEmployeeProfile = async (req, res) => {
     try {
-        console.log("Employee profile request for:", req.user?.email);
 
         if (!req.user?.email) {
             return res.status(400).json({ message: "Invalid user data - email missing" });
@@ -156,7 +203,6 @@ export const getEmployeeProfile = async (req, res) => {
 
         // Auto-create Employee record if it doesn't exist
         if (!employee) {
-            console.log(`📝 Employee record not found for ${req.user.email}, creating one...`);
             employee = new Employee({
                 empName: req.user.name || "Employee",
                 email: req.user.email,
@@ -187,7 +233,10 @@ export const getEmployeeProfile = async (req, res) => {
             earnings: employee.earnings || 0,
             avatar: employee.avatar || 'DP',
             joinDate: employee.joinDate,
-            bio: employee.bio,
+            bio: employee.bio || "",
+            specialties: employee.specialties || [],
+            certifications: employee.certifications || [],
+            address: employee.address || "",
             rating: employee.rating || 0,
             completedJobs: employee.completedJobs || 0,
             statistics: employee.statistics || { totalEarnings: 0, hoursWorked: 0 }
@@ -233,19 +282,23 @@ export const getTopTechnicians = async (req, res) => {
  */
 export const createEmployee = async (req, res) => {
     try {
-        const { name, email, phone, role, earnings, status, countryId, stateId, cityId, areaId } = req.body;
+        const { name, email, phone, role, earnings, status, countryId, stateId, cityId, areaId, address, bio, specialties, certifications } = req.body;
 
         const newEmployee = new Employee({
             empName: name,
             email,
             phone,
             role,
-            earnings,
-            status,
+            earnings: earnings !== undefined ? earnings : 0,
+            status: status || "Active",
             countryId,
             stateId,
             cityId,
             areaId,
+            address: address || "",
+            bio: bio || "",
+            specialties: specialties || [],
+            certifications: certifications || [],
             avatar: name ? name.split(' ').map(n => n[0]).join('').toUpperCase() : "DP"
         });
 

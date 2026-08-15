@@ -24,10 +24,6 @@ export const sendEmail = async ({ to, subject, text, html }) => {
         const transporter = createTransporter();
 
         if (!transporter) {
-            console.log('⚠️ No SMTP credentials found. Email simulation:');
-            console.log(`To: ${to}`);
-            console.log(`Subject: ${subject}`);
-            console.log(`Text: ${text}`);
             return { success: true, message: 'Email simulated (check console)' };
         }
 
@@ -38,8 +34,6 @@ export const sendEmail = async ({ to, subject, text, html }) => {
             text,
             html: html || text,
         });
-
-        console.log("Message sent: %s", info.messageId);
         return { success: true, messageId: info.messageId };
     } catch (error) {
         console.error("Error sending email: ", error);

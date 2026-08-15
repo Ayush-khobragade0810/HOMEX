@@ -115,6 +115,31 @@ export const register = async (req, res) => {
       }
     });
 
+    // If role is employee, auto-create the corresponding Employee profile
+    if (user.role === 'employee') {
+      try {
+        const Employee = (await import('../models/adminEmployee.js')).default;
+        const employeeRecord = new Employee({
+          empName: user.name || "Employee",
+          email: user.email,
+          phone: user.phone || "",
+          role: "Service Technician",
+          status: "Active",
+          countryId: 1,
+          stateId: 1,
+          cityId: 1,
+          areaId: "1",
+          earnings: 0,
+          rating: 5,
+          completedJobs: 0,
+          avatar: user.name ? user.name.split(' ').map(n => n[0]).join('').toUpperCase() : 'EMP'
+        });
+        await employeeRecord.save();
+      } catch (err) {
+        console.error("❌ Failed to auto-create employee during signup:", err.message);
+      }
+    }
+
     // Generate tokens
     const { accessToken, refreshToken, refreshTokenExpires } = generateTokens(user);
 
@@ -199,7 +224,6 @@ export const signup = register;
 // @route   POST /api/auth/login
 // @access  Public
 export const login = async (req, res) => {
-  console.log("LOGIN HIT", req.headers.authorization);
   const startTime = Date.now(); // For timing attack prevention
   const { email, password } = req.body;
   const ip = normalizeIP(req.ip);
@@ -571,16 +595,20 @@ export const employeeLogin = async (req, res) => {
       let employeeRecord = await Employee.findOne({ email: user.email });
 
       if (!employeeRecord) {
-        console.log(`📝 Auto-sync: Creating missing Employee record for ${user.email}`);
         employeeRecord = new Employee({
           empName: user.name || "Employee",
           email: user.email,
           phone: user.phone || "",
           role: "Service Technician",
           status: "Active",
+          countryId: 1,
+          stateId: 1,
+          cityId: 1,
+          areaId: "1",
           earnings: 0,
           rating: 5,
-          completedJobs: 0
+          completedJobs: 0,
+          avatar: user.name ? user.name.split(' ').map(n => n[0]).join('').toUpperCase() : 'EMP'
         });
         await employeeRecord.save();
       }
@@ -671,7 +699,6 @@ export const updateProfile = async (req, res) => {
 // @access  Private
 export const changePassword = async (req, res) => {
   const userId = req.user.userId || req.user._id || req.user.id; // Prioritize userId (User ID) over id (Employee ID)
-  console.log("🔐 CHANGE PASSWORD REQUEST:", { userId, userObj: req.user });
 
   const { currentPassword, newPassword } = req.body;
 
@@ -681,7 +708,6 @@ export const changePassword = async (req, res) => {
 
   try {
     const user = await User.findById(userId).select('+password');
-    console.log("🔍 Database User Search Result:", user ? "Found" : "Not Found");
 
     if (!user) {
       return res.status(404).json({ message: 'User account not found', debugId: userId });

@@ -702,11 +702,6 @@ const assignBookingHandler = async (req, res) => {
     const { bookingId } = req.params;
     const { employeeId } = req.body;
 
-    console.log("🔥 Assign booking controller HIT");
-    console.log("METHOD:", req.method);
-    console.log("PARAMS:", req.params);
-    console.log("BODY:", req.body);
-
     if (!bookingId || !employeeId) {
       console.error("❌ Missing required fields:", { bookingId, employeeId });
       return res.status(400).json({
@@ -754,7 +749,6 @@ const assignBookingHandler = async (req, res) => {
 
     // Check if employee is active
     if (employee.status !== 'Active') {
-      console.warn(`⚠️ Attempted assignment to inactive employee: ${employee.empName} (${employee.status})`);
       return res.status(400).json({
         success: false,
         error: "Cannot assign booking to inactive employee",
@@ -779,7 +773,6 @@ const assignBookingHandler = async (req, res) => {
 
     try {
       await booking.save();
-      console.log("✅ Booking assigned to employee (Status: PENDING)");
     } catch (saveError) {
       console.error("❌ Error saving booking:", saveError);
       return res.status(500).json({ success: false, error: "Failed to save booking assignment", details: saveError.message });
@@ -791,17 +784,36 @@ const assignBookingHandler = async (req, res) => {
       const lastService = await Service.findOne().sort({ serviceId: -1 });
       const newServiceId = lastService ? (lastService.serviceId + 1) : 1001;
 
+      // Populate Area information before creating legacy Service
+      const populatedBooking = await Booking.findById(booking._id)
+          .populate('location.area')
+          .lean();
+
+      const areaDoc = populatedBooking?.location?.area;
+      const customerAddress = populatedBooking?.location?.completeAddress || populatedBooking?.location?.address || '';
+
       // Determine customer name/details with fallbacks
       const customerName = booking.userName || booking.contactIdInfo?.fullName || booking.contactInfo?.fullName || (booking.customer ? "Customer" : "Guest");
       const customerPhone = booking.userPhone || booking.contactIdInfo?.phoneNumber || booking.contactInfo?.phoneNumber || "";
-
-      let customerAddress = "";
-      if (booking.location) {
-        customerAddress = booking.location.completeAddress ||
-          `${booking.location.area || ''}, ${booking.location.city || ''}` || "";
-      }
-
       const customerEmail = booking.userEmail || booking.contactIdInfo?.email || booking.contactInfo?.email || "";
+
+      const customerLocation = {
+          name: customerName,
+          address: customerAddress,
+          completeAddress: customerAddress,
+          phone: customerPhone,
+          email: customerEmail,
+
+          // preserve structured location
+          area: areaDoc?._id || null,
+          areaName: areaDoc?.areaName || areaDoc?.name || '',
+          city: areaDoc?.city || '',
+          state: areaDoc?.state || '',
+          country: areaDoc?.country || '',
+          pincode: populatedBooking?.location?.pincode || areaDoc?.pincode || '',
+          landmark: populatedBooking?.location?.landmark || '',
+          coordinates: populatedBooking?.location?.coordinates || null
+      };
 
       const newService = new Service({
         serviceId: newServiceId,
@@ -810,12 +822,7 @@ const assignBookingHandler = async (req, res) => {
         description: booking.specialInstructions || "No special instructions",
         serviceType: booking.category || booking.serviceDetails?.category || "General",
         status: 'scheduled',
-        customer: {
-          name: customerName,
-          address: customerAddress,
-          phone: customerPhone,
-          email: customerEmail
-        },
+        customer: customerLocation,
         scheduledDate: booking.schedule?.preferredDate || booking.date || new Date(),
         time: booking.schedule?.timeSlot || booking.time || "09:00 AM",
         estimatedEarnings: (booking.price || booking.payment?.amount || 0) * 0.8, // Assuming 80% split
@@ -824,7 +831,6 @@ const assignBookingHandler = async (req, res) => {
       });
 
       await newService.save();
-      console.log("✅ Service record created:", newServiceId);
 
       // 5. Create Notification
       await Notification.create({
@@ -835,7 +841,6 @@ const assignBookingHandler = async (req, res) => {
         relatedId: newService._id,
         relatedModel: "Service"
       });
-      console.log("✅ Notification created");
 
     } catch (innerError) {
       console.error("⚠️ Secondary error (Service/Notification):", innerError);

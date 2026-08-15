@@ -17,11 +17,21 @@ const serviceSchema = new mongoose.Schema({
     customer: {
         name: String,
         address: String,
+        completeAddress: String,
         landmark: String,
         pincode: String,
         phone: String,
         alternatePhone: String,
-        email: String
+        email: String,
+        area: { type: mongoose.Schema.Types.ObjectId, ref: 'Area' },
+        areaName: String,
+        city: String,
+        state: String,
+        country: String,
+        coordinates: {
+            lat: Number,
+            lng: Number
+        }
     },
     category: String,
     scheduledDate: { type: Date, required: true },

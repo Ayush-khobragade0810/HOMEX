@@ -57,7 +57,39 @@ router.get("/user/bookings", userAuth, async (req, res) => {
     const bookings = await Booking.find({ userId: req.user.id }) // userId or customer? Schema says userId or customer...
       // Original code used 'customer: req.user.id'. I'll stick to that.
       .populate('serviceId')
-      .sort({ createdAt: -1 });
+      .populate('location.area')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    bookings.forEach(booking => {
+      if (booking.location) {
+        let areaObj = null;
+
+        if (booking.location.area) {
+          if (typeof booking.location.area === 'object') {
+            areaObj = {
+              _id: booking.location.area._id,
+              area: booking.location.area.areaName || booking.location.area.name || "",
+              areaName: booking.location.area.areaName || booking.location.area.name || "",
+              city: booking.location.area.city || "",
+              state: booking.location.area.state || "",
+              country: booking.location.area.country || "",
+              pincode: booking.location.area.pincode || ""
+            };
+          }
+        }
+
+        booking.location = {
+          area: areaObj || booking.location.area,
+          address: booking.location.completeAddress || booking.location.address || "",
+          completeAddress: booking.location.completeAddress || booking.location.address || "",
+          pincode: booking.location.pincode || (areaObj ? areaObj.pincode : ""),
+          landmark: booking.location.landmark || "",
+          coordinates: booking.location.coordinates || null
+        };
+      }
+    });
+
     res.json({ success: true, bookings });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

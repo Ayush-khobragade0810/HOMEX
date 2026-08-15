@@ -15,11 +15,8 @@ export const getDashboardStats = async (req, res) => {
     const cachedStats = cache.get(cacheKey);
 
     if (cachedStats) {
-      console.log('🚀 Serving dashboard stats from cache');
       return res.json({ success: true, ...cachedStats });
     }
-
-    console.log('📊 Fetching fresh dashboard stats...');
 
     const startOfDay = moment().startOf('day').toDate();
     const endOfDay = moment().endOf('day').toDate();
@@ -56,8 +53,6 @@ export const getDashboardStats = async (req, res) => {
         'schedule.preferredDate': { $gte: startOfDay, $lte: endOfDay }
       })
     ]);
-
-    console.log('✅ Basic counts completed');
 
     // Run aggregations individually with error handling for each to pinpoint failure
     let totalEarnings = 0;
@@ -115,8 +110,6 @@ export const getDashboardStats = async (req, res) => {
     // Cache results for 5 minutes
     cache.set(cacheKey, stats, 5 * 60 * 1000);
 
-    console.log('✅ Dashboard stats compiled successfully');
-
     res.json({
       success: true,
       ...stats
@@ -157,38 +150,66 @@ export const getRecentBookings = async (req, res) => {
       .limit(limit)
       .populate('customer', 'name email phone')
       .populate('assignedTo', 'name email phone')
+      .populate('location.area')
       .lean();
 
-    const formatted = bookings.map(b => ({
-      _id: b._id,
-      bookingId: b.bookingId,
+    const formatted = bookings.map(b => {
+      let areaObj = null;
 
-      // SERVICE DETAILS
-      serviceName: b.serviceName || b.serviceDetails?.title,
-      category: b.category || b.serviceDetails?.category,
-      price: b.price || b.serviceDetails?.price,
-      duration: b.duration || b.serviceDetails?.duration,
+      if (b.location && b.location.area) {
+        if (typeof b.location.area === 'object') {
+          areaObj = {
+            _id: b.location.area._id,
+            area: b.location.area.areaName || b.location.area.name || "",
+            areaName: b.location.area.areaName || b.location.area.name || "",
+            city: b.location.area.city || "",
+            state: b.location.area.state || "",
+            country: b.location.area.country || "",
+            pincode: b.location.area.pincode || ""
+          };
+        }
+      }
 
-      // CUSTOMER DETAILS
-      userName: b.userName || b.customer?.name || b.contactIdInfo?.fullName || b.contactInfo?.fullName,
-      userEmail: b.userEmail || b.customer?.email || b.contactIdInfo?.email || b.contactInfo?.email,
-      userPhone: b.userPhone || b.customer?.phone || b.contactInfo?.phoneNumber || b.contactIdInfo?.phoneNumber,
+      const formattedLocation = b.location ? {
+        area: areaObj || b.location.area,
+        address: b.location.completeAddress || b.location.address || "",
+        completeAddress: b.location.completeAddress || b.location.address || "",
+        pincode: b.location.pincode || (areaObj ? areaObj.pincode : ""),
+        landmark: b.location.landmark || "",
+        coordinates: b.location.coordinates || null
+      } : null;
 
-      // DATE & TIME
-      date: b.date || b.schedule?.preferredDate,
-      time: b.time,
-      timeSlot: b.timeSlot || b.schedule?.timeSlot,
+      return {
+        _id: b._id,
+        bookingId: b.bookingId,
 
-      // STATUS
-      status: b.status,
-      paymentStatus: b.payment?.status || 'pending',
+        // SERVICE DETAILS
+        serviceName: b.serviceName || b.serviceDetails?.title,
+        category: b.category || b.serviceDetails?.category,
+        price: b.price || b.serviceDetails?.price,
+        duration: b.duration || b.serviceDetails?.duration,
 
-      // PAYMENT
-      totalAmount: b.totalAmount || b.payment?.amount || b.price || b.serviceDetails?.price,
-      paymentMethod: b.payment?.method,
+        // CUSTOMER DETAILS
+        userName: b.userName || b.customer?.name || b.contactIdInfo?.fullName || b.contactInfo?.fullName,
+        userEmail: b.userEmail || b.customer?.email || b.contactIdInfo?.email || b.contactInfo?.email,
+        userPhone: b.userPhone || b.customer?.phone || b.contactInfo?.phoneNumber || b.contactIdInfo?.phoneNumber,
 
-      // ADDRESS
-      address: b.address || b.location?.completeAddress,
+        // DATE & TIME
+        date: b.date || b.schedule?.preferredDate,
+        time: b.time,
+        timeSlot: b.timeSlot || b.schedule?.timeSlot,
+
+        // STATUS
+        status: b.status,
+        paymentStatus: b.payment?.status || 'pending',
+
+        // PAYMENT
+        totalAmount: b.totalAmount || b.payment?.amount || b.price || b.serviceDetails?.price,
+        paymentMethod: b.payment?.method,
+
+        // ADDRESS
+        address: b.address || b.location?.completeAddress || b.location?.address,
+        location: formattedLocation,
 
       // SPECIAL INSTRUCTIONS
       specialInstructions: b.specialInstructions,
@@ -202,7 +223,8 @@ export const getRecentBookings = async (req, res) => {
           }
         : null,
       createdAt: b.createdAt
-    }));
+      };
+    });
 
     const total = await Booking.countDocuments(query);
 

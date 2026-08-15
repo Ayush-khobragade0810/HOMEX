@@ -292,8 +292,6 @@ export const getAreas = async (req, res) => {
       });
     }
 
-    console.log(`🔍 [BACKEND] Searching areas for: ${country}, ${state}, ${city}`);
-
     // Find all matching areas and retrieve _id and areaName
     const areas = await Area.find({ 
         country: { $regex: new RegExp(`^${country}$`, 'i') },
@@ -303,8 +301,6 @@ export const getAreas = async (req, res) => {
       .select('_id areaName')
       .sort({ areaName: 1 })
       .lean();
-
-    console.log(`🔍 [BACKEND] Found ${areas.length} areas for ${city}`);
 
     // Return the object list so frontend can capture areaId (_id)
     const data = areas;

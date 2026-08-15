@@ -1,4 +1,3 @@
-
 /**
  * @desc    Assign booking to employee
  * @route   POST /api/admin/bookings/:id/assign
@@ -41,12 +40,36 @@ router.post("/bookings/:id/assign", authenticateAdmin, async (req, res) => {
         const lastService = await Service.findOne().sort({ serviceId: -1 });
         const newServiceId = lastService ? lastService.serviceId + 1 : 1001;
 
+        // Populate Area information before creating legacy Service
+        const populatedBooking = await Booking.findById(booking._id)
+            .populate('location.area')
+            .lean();
+
+        const areaDoc = populatedBooking?.location?.area;
+        const customerAddress = populatedBooking?.location?.completeAddress || populatedBooking?.location?.address || '';
+
         // Determine customer name/details
         const customerName = booking.userName || booking.contactIdInfo?.fullName || booking.contactInfo?.fullName || "Guest";
         const customerPhone = booking.userPhone || booking.contactIdInfo?.phoneNumber || booking.contactInfo?.phoneNumber || "";
-        const customerAddress = booking.location?.completeAddress ||
-            `${booking.location?.area}, ${booking.location?.city}` || "";
         const customerEmail = booking.userEmail || booking.contactIdInfo?.email || booking.contactInfo?.email || "";
+
+        const customerLocation = {
+            name: customerName,
+            address: customerAddress,
+            completeAddress: customerAddress,
+            phone: customerPhone,
+            email: customerEmail,
+
+            // preserve structured location
+            area: areaDoc?._id || null,
+            areaName: areaDoc?.areaName || areaDoc?.name || '',
+            city: areaDoc?.city || '',
+            state: areaDoc?.state || '',
+            country: areaDoc?.country || '',
+            pincode: populatedBooking?.location?.pincode || areaDoc?.pincode || '',
+            landmark: populatedBooking?.location?.landmark || '',
+            coordinates: populatedBooking?.location?.coordinates || null
+        };
 
         const newService = new Service({
             serviceId: newServiceId,
@@ -55,12 +78,7 @@ router.post("/bookings/:id/assign", authenticateAdmin, async (req, res) => {
             description: booking.specialInstructions || "No special instructions",
             serviceType: booking.category || booking.serviceDetails?.category || "General",
             status: 'scheduled',
-            customer: {
-                name: customerName,
-                address: customerAddress,
-                phone: customerPhone,
-                email: customerEmail
-            },
+            customer: customerLocation,
             scheduledDate: booking.schedule?.preferredDate || booking.date,
             time: booking.schedule?.timeSlot || booking.time,
             estimatedEarnings: (booking.price || booking.payment?.amount || 0) * 0.8, // Assuming 80% split

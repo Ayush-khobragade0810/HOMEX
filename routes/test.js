@@ -4,8 +4,6 @@ const router = express.Router();
 
 // Simple test endpoint - no database, no logic
 router.post('/test-booking', (req, res) => {
-    console.log('🧪 TEST ENDPOINT HIT');
-    console.log('Request body:', req.body);
 
     // Immediate response
     res.json({
@@ -18,7 +16,6 @@ router.post('/test-booking', (req, res) => {
 
 // Test with database but minimal
 router.post('/test-db', async (req, res) => {
-    console.log('🧪 DATABASE TEST ENDPOINT');
 
     try {
         // Just test connection
@@ -29,7 +26,6 @@ router.post('/test-db', async (req, res) => {
             2: 'connecting',
             3: 'disconnecting'
         };
-        console.log('Database status:', dbStatus, statusMap[dbStatus]);
 
         res.json({
             success: true,

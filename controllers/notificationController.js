@@ -3,15 +3,12 @@ import Notification from '../models/Notification.js';
 // Get all notifications for current user
 export const getNotifications = async (req, res) => {
     try {
-        console.log('📢 Fetching notifications for user:', req.user.id);
 
         const notifications = await Notification.find({
             userId: req.user.id
         })
             .sort({ createdAt: -1 })
             .limit(20);
-
-        console.log(`✅ Found ${notifications.length} notifications`);
 
         res.json({
             success: true,
@@ -107,8 +104,6 @@ export const createNotification = async (userId, type, title, message, data = {}
             isRead: false,
             createdAt: new Date()
         });
-
-        console.log(`📢 Notification created for user ${userId}: ${title}`);
         return notification;
 
     } catch (error) {

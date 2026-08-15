@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 import Booking from '../models/Booking.js';
 import User from '../models/User.js';
 import Notification from '../models/Notification.js';
-import { emitBookingUpdate, sendNotification } from "../utils/helpers.js";
+import { emitBookingUpdate, sendNotification, cache } from "../utils/helpers.js";
 import { sendEmail, getAssignmentEmailTemplate, getStatusUpdateEmailTemplate } from '../services/emailService.js';
 import { generateInvoiceHTML } from '../utils/invoiceTemplate.js';
 
@@ -51,7 +51,7 @@ const calculateDurationFromTimeSlot = (timeSlot) => {
     return diff > 0 ? diff : null;
 };
 
-const formatBookingResponse = (booking) => {
+export const formatBookingResponse = (booking) => {
     const userName =
         booking.userName ||
         booking.userId?.name ||
@@ -74,7 +74,36 @@ const formatBookingResponse = (booking) => {
         calculateDurationFromTimeSlot(booking.time || booking.schedule?.timeSlot) ||
         null;
 
-    return {
+    let formattedLocation = null;
+
+    if (booking.location) {
+        let areaObj = null;
+
+        if (booking.location.area) {
+            if (typeof booking.location.area === 'object') {
+                areaObj = {
+                    _id: booking.location.area._id,
+                    area: booking.location.area.areaName || booking.location.area.name || "",
+                    areaName: booking.location.area.areaName || booking.location.area.name || "",
+                    city: booking.location.area.city || "",
+                    state: booking.location.area.state || "",
+                    country: booking.location.area.country || "",
+                    pincode: booking.location.area.pincode || ""
+                };
+            }
+        }
+
+        formattedLocation = {
+            area: areaObj || booking.location.area,
+            address: booking.location.completeAddress || booking.location.address || "",
+            completeAddress: booking.location.completeAddress || booking.location.address || "",
+            pincode: booking.location.pincode || (areaObj ? areaObj.pincode : ""),
+            landmark: booking.location.landmark || "",
+            coordinates: booking.location.coordinates || null
+        };
+    }
+
+    const formattedResponse = {
         _id: booking._id,
         bookingId: booking.bookingId,
 
@@ -84,12 +113,15 @@ const formatBookingResponse = (booking) => {
             booking.category ||
             booking.serviceDetails?.category ||
             booking.serviceId?.category ||
+            booking.service?.category ||
             "General",
 
         price:
             booking.price ||
             booking.serviceDetails?.price ||
             booking.payment?.amount ||
+            booking.serviceId?.price ||
+            booking.service?.price ||
             0,
 
         // Extra services added on site + the recalculated invoice breakdown.
@@ -151,14 +183,16 @@ const formatBookingResponse = (booking) => {
         createdAt: booking.createdAt,
         updatedAt: booking.updatedAt,
 
-        // Detailed Info
-        address: booking.location?.completeAddress || booking.address,
+        address: booking.location?.completeAddress || booking.location?.address || booking.address || "",
         specialInstructions: booking.notes || booking.adminNotes,
+        location: formattedLocation,
 
         // Explicit fields used by admin modal
         duration,
         serviceDetails: booking.serviceDetails || null
     };
+
+    return formattedResponse;
 };
 
 // ======================================
@@ -262,6 +296,16 @@ export const getAllBookings = async (req, res) => {
                 }
             },
             { $unwind: { path: "$technicianInfo", preserveNullAndEmptyArrays: true } },
+            // Lookup Area details from areas collection
+            {
+                $lookup: {
+                    from: "areas",
+                    localField: "location.area",
+                    foreignField: "_id",
+                    as: "areaInfo"
+                }
+            },
+            { $unwind: { path: "$areaInfo", preserveNullAndEmptyArrays: true } },
             // Project and format - Final cleanup
             {
                 $project: {
@@ -274,7 +318,14 @@ export const getAllBookings = async (req, res) => {
                     duration: 1,
                     serviceDetails: 1,
                     schedule: 1,
-                    location: 1,
+                    location: {
+                        area: "$areaInfo",
+                        address: { $ifNull: ["$location.completeAddress", { $ifNull: ["$location.address", ""] }] },
+                        completeAddress: { $ifNull: ["$location.completeAddress", { $ifNull: ["$location.address", ""] }] },
+                        pincode: "$location.pincode",
+                        landmark: "$location.landmark",
+                        coordinates: "$location.coordinates"
+                    },
                     notes: 1,
                     payment: 1,
                     // Reconstruct assignedTo without the bloated avatar from the join
@@ -349,6 +400,7 @@ export const getBookingById = async (req, res) => {
         const booking = await Booking.findById(bookingId)
             .populate('userId', 'name email phone address avatar')
             .populate('serviceId', 'name title category price description duration')
+            .populate('location.area')
             .lean();
 
         if (!booking) {
@@ -377,10 +429,12 @@ export const getUserBookings = async (req, res) => {
         const bookings = await Booking.find({ userId: req.params.userId })
             .populate("assignedTo.technicianId", "name email")
             .populate("serviceId", "name category")
+            .populate("location.area")
             .sort({ createdAt: -1 })
             .lean();
 
-        res.json({ success: true, bookings });
+        const formattedBookings = bookings.map(b => formatBookingResponse(b));
+        res.json({ success: true, bookings: formattedBookings });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
@@ -497,6 +551,7 @@ export const updateBookingStatus = async (req, res) => {
             }
         }
 
+        cache.clear();
         res.json({
             success: true,
             message: 'Status updated',
@@ -525,6 +580,7 @@ export const updateBooking = async (req, res) => {
 
         if (!updated) return res.status(404).json({ success: false, error: "Booking not found" });
 
+        cache.clear();
         res.json({ success: true, message: "Booking updated", booking: formatBookingResponse(updated) });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
@@ -547,6 +603,7 @@ export const deleteBooking = async (req, res) => {
         }
 
         await Booking.findByIdAndDelete(bookingId);
+        cache.clear();
         res.json({ success: true, message: "Booking deleted" });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
@@ -593,6 +650,65 @@ export const assignBooking = async (req, res) => {
 
         const updatedBooking = await Booking.findByIdAndUpdate(bookingId, updateOperation, { new: true }).populate('userId').populate('serviceId');
 
+        // Create legacy Service Record for Employee Dashboard if not already existing
+        try {
+            const { default: Service } = await import('../models/Service.js');
+            const existingService = await Service.findOne({ notes: new RegExp(`Booking Ref: ${booking.bookingId}$`, 'i') });
+            if (!existingService) {
+                const lastService = await Service.findOne().sort({ serviceId: -1 });
+                const newServiceId = lastService ? (lastService.serviceId + 1) : 1001;
+
+                // Populate Area details
+                const populatedBooking = await Booking.findById(booking._id)
+                    .populate('location.area')
+                    .lean();
+
+                const areaDoc = populatedBooking?.location?.area;
+                const customerAddress = populatedBooking?.location?.completeAddress || populatedBooking?.location?.address || '';
+
+                const customerName = populatedBooking.userName || populatedBooking.contactIdInfo?.fullName || populatedBooking.contactInfo?.fullName || "Guest";
+                const customerPhone = populatedBooking.userPhone || populatedBooking.contactIdInfo?.phoneNumber || populatedBooking.contactInfo?.phoneNumber || "";
+                const customerEmail = populatedBooking.userEmail || populatedBooking.contactIdInfo?.email || populatedBooking.contactInfo?.email || "";
+
+                const customerLocation = {
+                    name: customerName,
+                    address: customerAddress,
+                    completeAddress: customerAddress,
+                    phone: customerPhone,
+                    email: customerEmail,
+
+                    // preserve structured location
+                    area: areaDoc?._id || null,
+                    areaName: areaDoc?.areaName || areaDoc?.name || '',
+                    city: areaDoc?.city || '',
+                    state: areaDoc?.state || '',
+                    country: areaDoc?.country || '',
+                    pincode: populatedBooking?.location?.pincode || areaDoc?.pincode || '',
+                    landmark: populatedBooking?.location?.landmark || '',
+                    coordinates: populatedBooking?.location?.coordinates || null
+                };
+
+                const newService = new Service({
+                    serviceId: newServiceId,
+                    empId: employee.empId || 0,
+                    title: booking.serviceName || booking.serviceDetails?.title || "Service Assignment",
+                    description: booking.specialInstructions || "No special instructions",
+                    serviceType: booking.category || booking.serviceDetails?.category || "General",
+                    status: 'scheduled',
+                    customer: customerLocation,
+                    scheduledDate: booking.schedule?.preferredDate || booking.date || new Date(),
+                    time: booking.schedule?.timeSlot || booking.time || "09:00 AM",
+                    estimatedEarnings: (booking.price || booking.payment?.amount || 0) * 0.8,
+                    paymentStatus: booking.payment?.status || 'pending',
+                    notes: `Booking Ref: ${booking.bookingId}`
+                });
+
+                await newService.save();
+            }
+        } catch (innerError) {
+            console.error("⚠️ Secondary error (Service creation in controller):", innerError);
+        }
+
         await sendNotification(employee._id.toString(), {
             type: 'assignment',
             title: 'New Service Assignment',
@@ -600,6 +716,7 @@ export const assignBooking = async (req, res) => {
             bookingId: updatedBooking._id
         });
 
+        cache.clear();
         res.json({ success: true, message: 'Employee assigned successfully', booking: formatBookingResponse(updatedBooking) });
 
     } catch (error) {
