@@ -95,3 +95,39 @@ export function applyBilling(booking, overrides = {}) {
     booking.billing = billing;
     return billing;
 }
+
+/**
+ * Read-side total summary for list/detail endpoints.
+ *
+ * Deliberately RECOMPUTES rather than trusting the persisted `billing` block:
+ * bookings created before this feature have no breakdown at all, and any writer
+ * that updates a booking without going through applyBilling/computeBilling
+ * leaves `billing.grandTotal` stale. Deriving from serviceDetails.price +
+ * extraServices — the actual source of truth — is self-healing for both.
+ *
+ * Spread the result into a list-item payload so every surface (employee
+ * dashboard, schedule, admin, invoice) reports the same number.
+ */
+export function bookingTotals(booking = {}) {
+    const billing = computeBilling(booking);
+    const extraServices = Array.isArray(booking?.extraServices) ? booking.extraServices : [];
+
+    return {
+        // Base service price, never mutated by extras.
+        estimatedEarnings: billing.baseAmount,
+        baseAmount: billing.baseAmount,
+        extrasTotal: billing.extrasTotal,
+        // The number every UI should show as "the booking total".
+        totalPrice: billing.grandTotal,
+        hasExtras: extraServices.length > 0,
+        extraServices: extraServices.map((ex) => ({
+            _id: ex._id,
+            name: ex.name,
+            quantity: ex.quantity,
+            unitPrice: ex.unitPrice,
+            amount: ex.amount,
+            notes: ex.notes
+        })),
+        billing
+    };
+}

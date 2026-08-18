@@ -2,6 +2,7 @@ import Booking from "../models/Booking.js";
 import Service from "../models/Service.js";
 import mongoose from "mongoose";
 import moment from "moment";
+import { computeBilling, bookingTotals } from "../utils/billing.js";
 
 const getFullAddress = (b) => {
     if (!b) return '';
@@ -216,18 +217,6 @@ export const getSchedules = async (req, res) => {
 
         // --- MAP & MERGE ---
         let mappedBookings = bookings.map(booking => {
-            // Base price from serviceDetails
-            const basePrice = booking.serviceDetails?.price || booking.payment?.amount || 0;
-
-            // Extra services added during the job
-            const extraServices = booking.extraServices || [];
-            const extrasTotal = booking.billing?.extrasTotal ||
-                extraServices.reduce((sum, ex) => sum + (ex.amount || 0), 0) || 0;
-
-            // Final total: use billing.grandTotal if available, otherwise base + extras
-            const totalPrice = booking.billing?.grandTotal ||
-                (extrasTotal > 0 ? basePrice + extrasTotal : basePrice);
-
             return {
                 _id: booking._id,
                 serviceId: booking.bookingId,
@@ -240,18 +229,10 @@ export const getSchedules = async (req, res) => {
                 serviceName: booking.serviceDetails?.title || 'Service',
                 serviceType: booking.serviceDetails?.category || 'General',
                 duration: booking.serviceDetails?.duration || 60,
-                // Always send both base and updated total
-                estimatedEarnings: basePrice,
-                totalPrice,
-                extrasTotal,
-                hasExtras: extraServices.length > 0,
-                extraServices: extraServices.map(ex => ({
-                    name: ex.name,
-                    quantity: ex.quantity,
-                    unitPrice: ex.unitPrice,
-                    amount: ex.amount
-                })),
-                billing: booking.billing || null,
+                // Always send both base and updated total. Recomputed from
+                // serviceDetails.price + extraServices, so a stale persisted
+                // `billing` block can never surface an outdated total.
+                ...bookingTotals(booking),
                 customer: {
                     name: booking.userId?.name || booking.contactIdInfo?.fullName || 'Customer',
                     phone: booking.userId?.phone || booking.contactIdInfo?.phoneNumber,
@@ -411,14 +392,25 @@ export const updateServiceStatus = async (req, res) => {
             updatedAt: new Date()
         };
         if (notes) updateData.notes = notes;
-        if (actualEarnings) {
-            updateData['payment.amount'] = actualEarnings;
-            updateData['serviceDetails.price'] = actualEarnings;
+        if (actualEarnings !== undefined && actualEarnings !== null && actualEarnings !== '') {
+            // `actualEarnings` is what the technician COLLECTED, which already
+            // includes any extra services. It must never be written back to
+            // serviceDetails.price — that is the base rate, and overwriting it
+            // made the next computeBilling() add the extras a second time.
+            const collected = Number(actualEarnings);
+            if (!Number.isFinite(collected) || collected < 0) {
+                return res.status(400).json({ message: 'actualEarnings must be a non-negative number.' });
+            }
+            updateData['payment.amount'] = collected;
         }
         if (status?.toUpperCase() === 'COMPLETED') {
             updateData.completedAt = new Date();
             updateData['payment.status'] = 'paid';
         }
+
+        // Keep the persisted invoice breakdown in step with the booking.
+        const existingBooking = await Booking.findOne(query).lean();
+        if (existingBooking) updateData.billing = computeBilling(existingBooking);
 
         let result = await Booking.findOneAndUpdate(query, updateData, { new: true });
         if (!result) {
@@ -455,7 +447,25 @@ export const completeService = async (req, res) => {
         const { id } = req.params;
         const { actualEarnings, notes } = req.body;
         const query = mongoose.Types.ObjectId.isValid(id) ? { _id: id } : { bookingId: id };
-        let result = await Booking.findOneAndUpdate(query, { status: 'COMPLETED', completedAt: new Date(), 'payment.amount': actualEarnings, 'payment.status': 'paid', technicianNotes: notes, updatedAt: new Date() }, { new: true });
+
+        // Recompute the invoice so extras added during the job are reflected in
+        // the stored breakdown. When the technician does not report a collected
+        // figure, bill the computed grand total rather than writing `undefined`.
+        const existingBooking = await Booking.findOne(query).lean();
+        const billing = existingBooking ? computeBilling(existingBooking) : null;
+
+        const reported = Number(actualEarnings);
+        const collected =
+            actualEarnings !== undefined && actualEarnings !== null && actualEarnings !== '' &&
+            Number.isFinite(reported) && reported >= 0
+                ? reported
+                : billing?.grandTotal;
+
+        const bookingUpdate = { status: 'COMPLETED', completedAt: new Date(), 'payment.status': 'paid', technicianNotes: notes, updatedAt: new Date() };
+        if (billing) bookingUpdate.billing = billing;
+        if (collected !== undefined) bookingUpdate['payment.amount'] = collected;
+
+        let result = await Booking.findOneAndUpdate(query, bookingUpdate, { new: true });
         if (!result) result = await Service.findOneAndUpdate(mongoose.Types.ObjectId.isValid(id) ? { _id: id } : { serviceId: id }, { status: 'completed', completedDate: new Date(), actualEarnings, paymentStatus: 'paid', notes }, { new: true });
         if (!result) return res.status(404).json({ message: "Service not found" });
         res.json(result);

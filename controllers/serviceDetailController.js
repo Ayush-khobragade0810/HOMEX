@@ -2,6 +2,7 @@ import Service from "../models/Service.js";
 import ServiceNote from "../models/ServiceNote.js";
 import Booking from "../models/Booking.js";
 import mongoose from "mongoose";
+import { computeBilling, bookingTotals } from "../utils/billing.js";
 
 const getFullAddress = (b) => {
     if (!b) return '';
@@ -102,7 +103,8 @@ export const getServiceDetails = async (req, res) => {
             time: booking.schedule?.timeSlot || '09:00 AM',
             scheduledDate: booking.schedule?.preferredDate,
             duration: durationHours,
-            estimatedEarnings: booking.serviceDetails?.price || 0,
+            // base price + extras breakdown + grand total
+            ...bookingTotals(booking),
             location: booking.location || null
         };
 
@@ -254,10 +256,25 @@ export const updateServiceInfo = async (req, res) => {
             if (filteredUpdate.duration) {
                 bookingUpdate['serviceDetails.duration'] = filteredUpdate.duration * 60;
             }
-            if (filteredUpdate.estimatedEarnings) {
-                bookingUpdate['serviceDetails.price'] = filteredUpdate.estimatedEarnings;
+            if (filteredUpdate.estimatedEarnings !== undefined && filteredUpdate.estimatedEarnings !== null && filteredUpdate.estimatedEarnings !== '') {
+                // This edits the BASE price (unlike a collected-earnings figure,
+                // which must never be written here — see scheduleController).
+                const base = Number(filteredUpdate.estimatedEarnings);
+                if (!Number.isFinite(base) || base < 0) {
+                    return res.status(400).json({ message: 'estimatedEarnings must be a non-negative number.' });
+                }
+                bookingUpdate['serviceDetails.price'] = base;
             }
-            
+
+            // Changing the base price changes the invoice — recompute it here so
+            // the stored breakdown cannot drift from serviceDetails + extras.
+            const existingBooking = await Booking.findOne(query).lean();
+            if (existingBooking) {
+                bookingUpdate.billing = computeBilling(existingBooking, {
+                    baseAmount: bookingUpdate['serviceDetails.price'] ?? existingBooking.serviceDetails?.price
+                });
+            }
+
             const booking = await Booking.findOneAndUpdate(
                 query,
                 { $set: bookingUpdate },

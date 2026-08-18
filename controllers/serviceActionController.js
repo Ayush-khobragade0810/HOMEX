@@ -6,7 +6,7 @@ import Payment from "../models/Payment.js";
 import UpcomingPayment from "../models/UpcomingPayment.js";
 import { emitBookingUpdate } from "../socket.js";
 import mongoose from "mongoose";
-import { computeBilling, normalizeExtraService } from "../utils/billing.js";
+import { computeBilling, normalizeExtraService, bookingTotals } from "../utils/billing.js";
 
 const parseClockToMinutes = (value) => {
     if (!value) return null;
@@ -304,6 +304,9 @@ export const completeService = async (req, res) => {
 
 const isAdminRequest = (req) => String(req.user?.role || '').toLowerCase() === 'admin';
 
+/** Window in which an identical extra-service line is treated as a re-submit. */
+const DUPLICATE_EXTRA_WINDOW_MS = 15_000;
+
 /** Load a booking by ObjectId or human bookingId, as a plain object. */
 const loadBookingForBilling = async (id) => {
     const { default: Booking } = await import('../models/Booking.js');
@@ -389,6 +392,27 @@ export const addExtraService = async (req, res) => {
         const line = normalizeExtraService(req.body);
         if (!line.name) {
             return res.status(400).json({ message: 'Service name is required.' });
+        }
+
+        // Guard against accidental double-addition (double-tap, client retry,
+        // a resubmitted form in a second tab). An identical line logged within
+        // the last 15s is treated as the same request, while a deliberate
+        // repeat of the same service later is still allowed through.
+        const now = Date.now();
+        const isRecentDuplicate = (booking.extraServices || []).some((e) => {
+            const addedAt = e?.addedAt ? new Date(e.addedAt).getTime() : 0;
+            return (
+                String(e?.name || '').trim().toLowerCase() === line.name.toLowerCase() &&
+                Number(e?.unitPrice) === line.unitPrice &&
+                Number(e?.quantity) === line.quantity &&
+                Number.isFinite(addedAt) &&
+                now - addedAt < DUPLICATE_EXTRA_WINDOW_MS
+            );
+        });
+        if (isRecentDuplicate) {
+            return res.status(409).json({
+                message: 'This extra service was just added. Refresh to see the current charges.'
+            });
         }
 
         const nextExtras = [
@@ -602,7 +626,11 @@ export const getAssigned = async (req, res) => {
             scheduledDate: b.schedule?.preferredDate,
             time: b.schedule?.timeSlot || '09:00 AM',
             duration: getBookingDuration(b),
-            estimatedEarnings: b.serviceDetails?.price || 0,
+            // base price + extras breakdown + grand total
+            ...bookingTotals(b),
+            // Marks this as a Booking document (not a legacy Service). The
+            // client uses it to decide whether /extra-services applies.
+            source: 'booking',
             location: getFormattedLocation(b)
         })));
     } catch (err) {
@@ -636,8 +664,10 @@ export const getPending = async (req, res) => {
             pincode: b.location?.pincode || '',
             customerPhone: b.contactIdInfo?.phoneNumber || b.userId?.phone || '',
             alternatePhone: b.contactIdInfo?.alternatePhone || '',
-            estimatedEarnings: b.serviceDetails?.price || 0,
             duration: getBookingDuration(b),
+            // base price + extras breakdown + grand total
+            ...bookingTotals(b),
+            source: 'booking',
             location: getFormattedLocation(b)
         })));
     } catch (err) {
@@ -673,7 +703,11 @@ export const getCompleted = async (req, res) => {
             alternatePhone: b.contactIdInfo?.alternatePhone || '',
             completedDate: b.completedAt || b.updatedAt,
             duration: getBookingDuration(b),
+            // `payment` is what was actually collected (may include a tip);
+            // `totalPrice` from bookingTotals is the invoiced amount.
             payment: b.payment?.amount || 0,
+            ...bookingTotals(b),
+            source: 'booking',
             location: getFormattedLocation(b)
         })));
     } catch (err) {
@@ -710,7 +744,9 @@ export const getInProgress = async (req, res) => {
             customerPhone: b.contactIdInfo?.phoneNumber || b.userId?.phone || '',
             alternatePhone: b.contactIdInfo?.alternatePhone || '',
             scheduledDate: b.schedule?.preferredDate, duration: getBookingDuration(b),
-            estimatedEarnings: b.serviceDetails?.price || 0,
+            // base price + extras breakdown + grand total
+            ...bookingTotals(b),
+            source: 'booking',
             location: getFormattedLocation(b)
         }));
 
@@ -719,6 +755,8 @@ export const getInProgress = async (req, res) => {
             status: 'in_progress', customer: s.customer?.name || 'Guest',
             address: s.customer?.address || '', customerPhone: s.customer?.phone || '',
             scheduledDate: s.scheduledDate, duration: s.duration || 1, estimatedEarnings: s.estimatedEarnings || 0,
+            // Legacy Service document — has no Booking, so no extra services.
+            source: 'service',
             location: s.customer ? {
                 address: s.customer.address || '',
                 completeAddress: s.customer.address || '',

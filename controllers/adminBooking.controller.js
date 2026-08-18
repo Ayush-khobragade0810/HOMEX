@@ -5,6 +5,7 @@ import Notification from '../models/Notification.js';
 import { emitBookingUpdate, sendNotification, cache } from "../utils/helpers.js";
 import { sendEmail, getAssignmentEmailTemplate, getStatusUpdateEmailTemplate } from '../services/emailService.js';
 import { generateInvoiceHTML } from '../utils/invoiceTemplate.js';
+import { computeBilling } from '../utils/billing.js';
 
 // ======================================
 // HELPERS
@@ -103,6 +104,9 @@ export const formatBookingResponse = (booking) => {
         };
     }
 
+    // Single source of truth for this booking's money figures.
+    const bookingBilling = computeBilling(booking);
+
     const formattedResponse = {
         _id: booking._id,
         bookingId: booking.bookingId,
@@ -126,14 +130,14 @@ export const formatBookingResponse = (booking) => {
 
         // Extra services added on site + the recalculated invoice breakdown.
         extraServices: booking.extraServices || [],
-        billing: booking.billing || null,
+        billing: bookingBilling,
 
-        // Add for frontend compatibility
-        totalAmount:
-            booking.price ||
-            booking.serviceDetails?.price ||
-            booking.payment?.amount ||
-            0,
+        // Add for frontend compatibility.
+        // Must be the GRAND TOTAL (base + extras), not the base price — reading
+        // serviceDetails.price here made this endpoint report a stale total
+        // whenever an extra service had been added on site.
+        totalAmount: bookingBilling.grandTotal,
+        extrasTotal: bookingBilling.extrasTotal,
 
         // ✅ USER
         userName,

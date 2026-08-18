@@ -2,6 +2,7 @@ import moment from 'moment';
 import Booking from '../models/Booking.js';
 import User from '../models/User.js';
 import { cache } from '../utils/helpers.js';
+import { computeBilling } from '../utils/billing.js';
 
 
 /**
@@ -179,6 +180,8 @@ export const getRecentBookings = async (req, res) => {
         coordinates: b.location.coordinates || null
       } : null;
 
+      const billing = computeBilling(b);
+
       return {
         _id: b._id,
         bookingId: b.bookingId,
@@ -204,7 +207,12 @@ export const getRecentBookings = async (req, res) => {
         paymentStatus: b.payment?.status || 'pending',
 
         // PAYMENT
-        totalAmount: b.totalAmount || b.payment?.amount || b.price || b.serviceDetails?.price,
+        // Grand total (base + on-site extras), recomputed from the source of
+        // truth so an added extra service is reflected here immediately.
+        totalAmount: billing.grandTotal,
+        extrasTotal: billing.extrasTotal,
+        extraServices: b.extraServices || [],
+        billing,
         paymentMethod: b.payment?.method,
 
         // ADDRESS

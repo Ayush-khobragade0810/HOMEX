@@ -4,6 +4,7 @@ import Notification from '../models/Notification.js';
 import { sendNotification, isUserOnline } from '../utils/helpers.js';
 import logger from '../utils/logger.js';
 import mongoose from 'mongoose';
+import { computeBilling } from '../utils/billing.js';
 
 // @desc    Get user profile (with authorization check)
 // @route   GET /api/user/profile/:id
@@ -231,6 +232,12 @@ export const getUserBookings = async (req, res) => {
 
         const total = await Booking.countDocuments(query);
 
+        // Recompute the invoice breakdown on read so the customer always sees
+        // the current total (base + on-site extras), even for bookings created
+        // before the billing feature or touched by a writer that did not
+        // refresh the stored block.
+        const data = bookings.map((b) => ({ ...b, billing: computeBilling(b) }));
+
         logger.audit('bookings_view', req.user, `user:${userId}`, {
             count: bookings.length,
             status,
@@ -244,7 +251,7 @@ export const getUserBookings = async (req, res) => {
             total,
             pages: Math.ceil(total / limit),
             currentPage: parseInt(page),
-            data: bookings
+            data
         });
     } catch (error) {
         logger.errorWithContext(
