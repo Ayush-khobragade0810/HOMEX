@@ -3,6 +3,7 @@ import analyticsService from "../services/analyticsService.js";
 import exportService from "../services/exportService.js";
 import Payment from "../models/Payment.js"; // Kept for direct simple queries if needed
 import UpcomingPayment from "../models/UpcomingPayment.js"; // Kept for consistency
+import PaymentIssue from "../models/PaymentIssue.js";
 import Employee from "../models/adminEmployee.js";
 import mongoose from "mongoose";
 
@@ -300,6 +301,123 @@ export const getPaymentMethods = async (req, res) => {
 
         const methods = await paymentService.getEmployeePaymentMethods(empId);
         res.json(methods);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+// Resolve a payment from either its Mongo _id or its numeric paymentId
+const findPaymentByAnyId = async (idInput) => {
+    if (!idInput) return null;
+
+    if (mongoose.Types.ObjectId.isValid(idInput) && String(new mongoose.Types.ObjectId(idInput)) === String(idInput).toLowerCase()) {
+        const byObjectId = await Payment.findById(idInput);
+        if (byObjectId) return byObjectId;
+    }
+
+    const numericId = parseInt(idInput);
+    if (!isNaN(numericId)) {
+        return await Payment.findOne({ paymentId: numericId });
+    }
+
+    return null;
+};
+
+// Download a PDF receipt for a single payment
+export const downloadReceipt = async (req, res) => {
+    try {
+        const payment = await findPaymentByAnyId(req.params.id);
+
+        if (!payment) {
+            return res.status(404).json({ error: "Payment not found" });
+        }
+
+        // Security check
+        if (req.user.role !== 'admin' && parseInt(req.user.empId) !== parseInt(payment.empId)) {
+            return res.status(403).json({ error: "Access denied. You can only download your own receipts." });
+        }
+
+        const employee = await Employee.findOne({ empId: payment.empId }).lean();
+        const employeeInfo = {
+            name: employee?.empName || employee?.name || req.user.name || "Employee",
+            empId: payment.empId,
+            email: employee?.email || req.user.email
+        };
+
+        const pdfBuffer = await exportService.generateReceipt(payment.toObject(), employeeInfo);
+        const fileId = payment.transactionId || payment.paymentId || String(payment._id).slice(-8);
+
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename=receipt-${fileId}.pdf`);
+        res.setHeader('Content-Length', pdfBuffer.length);
+        res.send(pdfBuffer);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+// Report an issue against a payment
+export const reportPaymentIssue = async (req, res) => {
+    try {
+        const payment = await findPaymentByAnyId(req.params.id);
+
+        if (!payment) {
+            return res.status(404).json({ error: "Payment not found" });
+        }
+
+        // Security check
+        if (req.user.role !== 'admin' && parseInt(req.user.empId) !== parseInt(payment.empId)) {
+            return res.status(403).json({ error: "Access denied. You can only report issues on your own payments." });
+        }
+
+        const { category, description } = req.body;
+
+        if (!description || !String(description).trim()) {
+            return res.status(400).json({ error: "Please describe the issue." });
+        }
+
+        const issue = await PaymentIssue.create({
+            paymentId: payment.paymentId,
+            payment: payment._id,
+            empId: payment.empId,
+            reportedByName: req.user.name,
+            reportedByEmail: req.user.email,
+            category: category || 'other',
+            description: String(description).trim(),
+            paymentSnapshot: {
+                amount: payment.amount,
+                commission: payment.commission,
+                status: payment.status,
+                date: payment.date,
+                transactionId: payment.transactionId
+            }
+        });
+
+        res.status(201).json({
+            message: "Issue reported successfully. Our team will review it shortly.",
+            issue
+        });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+};
+
+// List issues reported by an employee
+export const getPaymentIssues = async (req, res) => {
+    try {
+        const { empId: rawEmpId } = req.params;
+        const empId = await resolveNumericEmpId(rawEmpId);
+
+        if (!empId) {
+            return res.status(400).json({ error: "Invalid employee ID format or employee not found." });
+        }
+
+        // Security check
+        if (req.user.role !== 'admin' && parseInt(req.user.empId) !== parseInt(empId)) {
+            return res.status(403).json({ error: "Access denied. You can only view your own reported issues." });
+        }
+
+        const issues = await PaymentIssue.find({ empId }).sort({ createdAt: -1 }).lean();
+        res.json(issues);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

@@ -9,7 +9,10 @@ import {
     exportPayments,
     requestWithdrawal,
     addPaymentMethod,
-    getPaymentMethods
+    getPaymentMethods,
+    downloadReceipt,
+    reportPaymentIssue,
+    getPaymentIssues
 } from "../controllers/paymentController.js";
 import { protect } from "../middleware/authMiddleware.js";
 
@@ -22,6 +25,11 @@ router.get("/employee/:empId/export", protect, exportPayments);
 router.get("/employee/:empId/methods", protect, getPaymentMethods); // New route
 router.post("/employee/:empId/withdraw", protect, requestWithdrawal); // New route
 router.post("/employee/:empId/methods", protect, addPaymentMethod); // New route
+router.get("/employee/:empId/issues", protect, getPaymentIssues);
+
+// Single-payment actions (receipt download + issue reporting)
+router.get("/:id/receipt", protect, downloadReceipt);
+router.post("/:id/report-issue", protect, reportPaymentIssue);
 
 router.get("/:id", protect, getPaymentById);
 router.post("/", createPayment);
