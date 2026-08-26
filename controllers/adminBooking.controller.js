@@ -13,6 +13,93 @@ import { computeBilling } from '../utils/billing.js';
 
 const validateObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
 
+// ======================================
+// BOOKING STATUS
+// ======================================
+
+// Statuses persisted on the booking document. Everything the API accepts is
+// mapped onto one of these so the DB never accumulates new casing variants.
+export const BOOKING_STATUSES = ['PENDING', 'ACCEPTED', 'ASSIGNED', 'NAVIGATING', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'];
+
+export const STATUS_LABELS = {
+    PENDING: 'Pending',
+    ACCEPTED: 'Confirmed',
+    ASSIGNED: 'Assigned',
+    NAVIGATING: 'On the way',
+    IN_PROGRESS: 'In Progress',
+    COMPLETED: 'Completed',
+    CANCELLED: 'Cancelled'
+};
+
+// Accepts every casing/wording variant that exists in the DB and in the various
+// clients, and returns the canonical status (or null when unrecognised).
+export const normalizeStatus = (status) => {
+    if (!status || typeof status !== 'string') return null;
+
+    const key = status.trim().toLowerCase().replace(/[\s-]+/g, '_');
+    const aliases = {
+        pending: 'PENDING',
+        scheduled: 'PENDING',
+        reopen: 'PENDING',
+        rescheduled: 'PENDING',
+        confirmed: 'ACCEPTED',
+        accepted: 'ACCEPTED',
+        assigned: 'ASSIGNED',
+        navigating: 'NAVIGATING',
+        on_the_way: 'NAVIGATING',
+        started: 'IN_PROGRESS',
+        start: 'IN_PROGRESS',
+        current: 'IN_PROGRESS',
+        processing: 'IN_PROGRESS',
+        in_progress: 'IN_PROGRESS',
+        complete: 'COMPLETED',
+        completed: 'COMPLETED',
+        cancel: 'CANCELLED',
+        cancelled: 'CANCELLED',
+        canceled: 'CANCELLED',
+        rejected: 'CANCELLED'
+    };
+
+    return aliases[key] || (BOOKING_STATUSES.includes(key.toUpperCase()) ? key.toUpperCase() : null);
+};
+
+// ASSIGNED is "confirmed, and a technician is already on it". Re-confirming such
+// a booking must not throw away the assignment marker the employee dashboards
+// filter on, so the two count as the same step here.
+const isSameStep = (a, b) => a === b || (['ACCEPTED', 'ASSIGNED'].includes(a) && ['ACCEPTED', 'ASSIGNED'].includes(b));
+
+// Keeps the milestone timestamps in sync with the status. Moving a booking
+// backwards (e.g. "Reopen") has to clear the milestones it left behind,
+// otherwise the timeline keeps showing a completion that was undone.
+const applyStatusTimestamps = (booking, dbStatus, { updatedBy = 'admin', cancellationReason } = {}) => {
+    if (['ACCEPTED', 'ASSIGNED'].includes(dbStatus) && !booking.confirmedAt) booking.confirmedAt = new Date();
+    if (dbStatus === 'IN_PROGRESS' && !booking.startedAt) booking.startedAt = new Date();
+
+    if (dbStatus === 'COMPLETED') {
+        booking.completedAt = new Date();
+        if (!booking.startedAt) booking.startedAt = new Date();
+    } else {
+        booking.completedAt = undefined;
+    }
+
+    if (dbStatus === 'CANCELLED') {
+        booking.cancelledAt = new Date();
+        booking.cancelledBy = ['user', 'technician', 'admin', 'system'].includes(updatedBy) ? updatedBy : 'admin';
+        if (cancellationReason) booking.cancellationReason = cancellationReason;
+    } else {
+        booking.cancelledAt = undefined;
+        booking.cancelledBy = undefined;
+        booking.cancellationReason = undefined;
+    }
+
+    if (dbStatus === 'PENDING') {
+        booking.confirmedAt = undefined;
+        booking.startedAt = undefined;
+    }
+
+    booking.updatedAt = new Date();
+};
+
 const sanitizeInput = (input) => {
     if (typeof input === 'string') return input.trim();
     return input;
@@ -168,17 +255,31 @@ export const formatBookingResponse = (booking) => {
                 ? "in progress"
                 : booking.status,
 
+        // Canonical status + human label, so clients never have to guess casing.
+        statusCode: normalizeStatus(booking.status) || 'PENDING',
+        statusLabel: STATUS_LABELS[normalizeStatus(booking.status)] || booking.status || 'Pending',
+
         // Add timeline for frontend
-        statusTimeline: booking.statusTimeline?.map(entry => ({
+        statusTimeline: (booking.statusTimeline || []).map(entry => ({
             status: entry.status,
-            displayStatus: entry.status === 'IN_PROGRESS' ? 'in progress' : entry.status.toLowerCase(),
+            displayStatus: STATUS_LABELS[normalizeStatus(entry.status)] || entry.status,
             updatedBy: entry.updatedBy,
             timestamp: entry.timestamp,
             note: entry.note
-        })) || [],
+        })),
 
         // Track current step
-        currentStep: booking.statusTimeline?.[booking.statusTimeline.length - 1]?.status || 'PENDING',
+        currentStep: booking.statusTimeline?.[booking.statusTimeline.length - 1]?.status || normalizeStatus(booking.status) || 'PENDING',
+
+        // Milestone timestamps rendered by the booking timeline
+        confirmedAt: booking.confirmedAt || null,
+        startedAt: booking.startedAt || null,
+        completedAt: booking.completedAt || null,
+        cancelledAt: booking.cancelledAt || null,
+        cancelledBy: booking.cancelledBy || null,
+        cancellationBy: booking.cancelledBy || null, // legacy alias used by the admin UI
+        cancellationReason: booking.cancellationReason || null,
+        adminNotes: booking.adminNotes || "",
 
         // Add assigned employee info if exists
         assignedTo: booking.assignedTo,
@@ -458,24 +559,13 @@ export const updateBookingStatus = async (req, res) => {
             return res.status(400).json({ success: false, error: 'Booking ID and status are required' });
         }
 
-        const statusMap = {
-            'in progress': 'IN_PROGRESS',
-            'processing': 'IN_PROGRESS',
-            'in_progress': 'IN_PROGRESS',
-            'navigating': 'NAVIGATING',
-            'pending': 'PENDING',
-            'confirmed': 'ACCEPTED',
-            'accepted': 'ACCEPTED',
-            'completed': 'COMPLETED',
-            'cancelled': 'CANCELLED'
-        };
+        if (!validateObjectId(id)) {
+            return res.status(400).json({ success: false, error: 'Invalid booking ID' });
+        }
 
-        let dbStatus = statusMap[status.toLowerCase()] || status;
-        dbStatus = dbStatus.toUpperCase();
-        const validDbStatuses = ['PENDING', 'ACCEPTED', 'NAVIGATING', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'];
-
-        if (!validDbStatuses.includes(dbStatus)) {
-            return res.status(400).json({ success: false, error: 'Invalid status' });
+        const dbStatus = normalizeStatus(status);
+        if (!dbStatus) {
+            return res.status(400).json({ success: false, error: `Invalid status: ${status}` });
         }
 
         const booking = await Booking.findById(id);
@@ -483,28 +573,40 @@ export const updateBookingStatus = async (req, res) => {
             return res.status(404).json({ success: false, error: 'Booking not found' });
         }
 
-        const currentStatus = booking.status ? booking.status.toUpperCase() : 'PENDING';
-        
-        booking.status = dbStatus;
-        if (!booking.statusTimeline) {
-            booking.statusTimeline = [];
+        const currentStatus = normalizeStatus(booking.status) || 'PENDING';
+
+        // Idempotent: re-clicking the button for the status the booking is already
+        // in is a no-op, not an error.
+        if (isSameStep(currentStatus, dbStatus)) {
+            const unchanged = await Booking.findById(booking._id)
+                .populate('userId')
+                .populate('serviceId')
+                .populate('assignedTo.technicianId', 'name email phone')
+                .lean();
+
+            return res.json({
+                success: true,
+                message: `Booking is already ${STATUS_LABELS[dbStatus]}`,
+                unchanged: true,
+                booking: formatBookingResponse(unchanged)
+            });
         }
+
+        booking.status = dbStatus;
+        booking.previousStatus = currentStatus;
         booking.statusTimeline.push({
             status: dbStatus,
-            updatedBy: updatedBy,
-            note: notes || (dbStatus === 'CANCELLED' ? cancellationReason : 'Status updated')
+            updatedBy,
+            updatedById: req.user?._id,
+            note: notes || (dbStatus === 'CANCELLED' ? cancellationReason : null) || `Status changed from ${STATUS_LABELS[currentStatus] || currentStatus} to ${STATUS_LABELS[dbStatus]}`,
+            timestamp: new Date()
         });
 
-        if (dbStatus === 'CANCELLED') {
-            booking.cancelledAt = new Date();
-            booking.cancellationBy = updatedBy;
-            if (cancellationReason) booking.cancellationReason = cancellationReason;
-        } else if (dbStatus === 'COMPLETED') {
-            booking.completedAt = new Date();
-        }
+        applyStatusTimestamps(booking, dbStatus, { updatedBy, cancellationReason });
 
-        booking.updatedAt = new Date();
-        await booking.save();
+        // Only validate what this request touched — a lot of legacy bookings predate
+        // the currently required fields and would otherwise fail to save at all.
+        await booking.save({ validateModifiedOnly: true });
 
         const updated = await Booking.findById(booking._id)
             .populate('userId')
@@ -512,16 +614,15 @@ export const updateBookingStatus = async (req, res) => {
             .populate('assignedTo.technicianId', 'name email phone')
             .lean();
 
-        emitBookingUpdate(booking.bookingId, formatBookingResponse(updated).status, formatBookingResponse(updated));
+        const payload = formatBookingResponse(updated);
+        emitBookingUpdate(booking.bookingId, payload, 'admin');
 
-        // Side effects (Notifications, Emails)
-        if (booking.assignedTo) {
+        // Side effects (Notifications, Emails) — never allowed to fail the update.
+        const assignedEmail = updated.assignedTo?.technicianId?.email || updated.assignedTo?.email;
+        if (assignedEmail) {
             try {
-                const assignedEmp = updated.assignedTo;
-                if (assignedEmp && assignedEmp.email) {
-                    const { subject, html } = getStatusUpdateEmailTemplate(booking.bookingId, dbStatus, notes);
-                    await sendEmail({ to: assignedEmp.email, subject, html });
-                }
+                const { subject, html } = getStatusUpdateEmailTemplate(booking.bookingId, dbStatus, notes);
+                await sendEmail({ to: assignedEmail, subject, html });
             } catch (emailErr) {
                 console.error('Failed to send status update email to employee:', emailErr);
             }
@@ -529,12 +630,12 @@ export const updateBookingStatus = async (req, res) => {
 
         if (dbStatus === 'CANCELLED' && booking.userId) {
             try {
-                const userEmail = updated.userId?.email || booking.userId.email;
+                const userEmail = updated.userId?.email;
                 if (userEmail) {
                     await sendEmail({
                         to: userEmail,
                         subject: `Booking Cancelled - #${booking.bookingId}`,
-                        html: `<p>Your booking #${booking.bookingId} has been cancelled.</p>`
+                        html: `<p>Your booking #${booking.bookingId} has been cancelled.</p>${cancellationReason ? `<p>Reason: ${cancellationReason}</p>` : ''}`
                     });
                 }
             } catch (userEmailErr) {
@@ -547,7 +648,7 @@ export const updateBookingStatus = async (req, res) => {
                 await sendNotification(booking.userId, {
                     type: 'booking',
                     title: 'Booking Update',
-                    message: `Your booking #${booking.bookingId} status has changed to ${dbStatus.toLowerCase()}`,
+                    message: `Your booking #${booking.bookingId} is now ${STATUS_LABELS[dbStatus]}`,
                     data: { bookingId: booking._id, status: dbStatus }
                 });
             } catch (notifErr) {
@@ -558,13 +659,18 @@ export const updateBookingStatus = async (req, res) => {
         cache.clear();
         res.json({
             success: true,
-            message: 'Status updated',
-            booking: formatBookingResponse(updated)
+            message: `Status updated to ${STATUS_LABELS[dbStatus]}`,
+            previousStatus: currentStatus,
+            booking: payload
         });
 
     } catch (error) {
         console.error('Update Status Error:', error);
-        res.status(500).json({ success: false, error: 'Internal Server Error' });
+        const isValidation = error.name === 'ValidationError';
+        res.status(isValidation ? 400 : 500).json({
+            success: false,
+            error: isValidation ? error.message : 'Internal Server Error'
+        });
     }
 };
 
@@ -576,10 +682,27 @@ export const updateBookingStatus = async (req, res) => {
 export const updateBooking = async (req, res) => {
     try {
         const bookingId = sanitizeInput(req.params.id);
-        const updateData = { updatedAt: new Date(), ...req.body };
-        const updated = await Booking.findByIdAndUpdate(bookingId, updateData, { new: true })
+
+        if (!validateObjectId(bookingId)) {
+            return res.status(400).json({ success: false, error: "Invalid booking ID" });
+        }
+
+        // Whitelist: status has its own endpoint (it carries timeline + notification
+        // side effects), and money/ownership fields must not be editable from here.
+        const EDITABLE = ['adminNotes', 'notes', 'technicianNotes', 'customerNotes', 'priority'];
+        const updateData = { updatedAt: new Date() };
+        for (const field of EDITABLE) {
+            if (field in req.body) updateData[field] = sanitizeInput(req.body[field]);
+        }
+
+        if (Object.keys(updateData).length === 1) {
+            return res.status(400).json({ success: false, error: "No editable fields provided" });
+        }
+
+        const updated = await Booking.findByIdAndUpdate(bookingId, updateData, { new: true, runValidators: true })
             .populate("userId")
             .populate("serviceId")
+            .populate("assignedTo.technicianId", "name email phone")
             .lean();
 
         if (!updated) return res.status(404).json({ success: false, error: "Booking not found" });

@@ -33,6 +33,16 @@ const extraServiceSchema = new mongoose.Schema({
   addedAt: { type: Date, default: Date.now }
 }, { _id: true });
 
+// One entry per status change, in the order the change happened. Both the admin
+// and the employee flows append here, and the booking views render it directly.
+const statusTimelineSchema = new mongoose.Schema({
+  status: { type: String, required: true },
+  updatedBy: { type: String, default: 'system' },
+  updatedById: { type: mongoose.Schema.Types.ObjectId },
+  note: String,
+  timestamp: { type: Date, default: Date.now }
+}, { _id: false });
+
 const bookingSchema = new mongoose.Schema({
   bookingId: {
     type: String,
@@ -137,6 +147,8 @@ const bookingSchema = new mongoose.Schema({
     index: true
   },
   previousStatus: String, // For rollback capability
+  statusTimeline: { type: [statusTimelineSchema], default: [] },
+  adminNotes: String, // Internal notes, never exposed to the customer
   payment: {
     method: {
       type: String,
@@ -170,6 +182,8 @@ const bookingSchema = new mongoose.Schema({
   },
   completedAt: Date,
   startedAt: Date,
+  confirmedAt: Date,
+  cancelledAt: Date,
   estimatedCompletion: Date,
   rating: {
     stars: {

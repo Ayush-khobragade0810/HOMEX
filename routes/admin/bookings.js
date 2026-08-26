@@ -3,6 +3,7 @@ import {
     getAllBookings,
     updateBookingStatus,
     deleteBooking,
+    updateBooking,
     assignBooking,
     getBookingById,
     generateInvoice
@@ -40,6 +41,7 @@ router.route('/bookings')
 
 router.route('/bookings/:id')
     .get(getBookingById)
+    .put(updateBooking)
     .delete(deleteBooking);
 
 router.route('/bookings/:id/status')

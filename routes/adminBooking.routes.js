@@ -3,6 +3,7 @@ import {
     getAllBookings,
     updateBookingStatus,
     deleteBooking,
+    updateBooking,
     assignBooking
 } from '../controllers/adminBooking.controller.js';
 import {
@@ -35,6 +36,7 @@ router.route('/bookings')
     .get(getAllBookings);
 
 router.route('/bookings/:id')
+    .put(updateBooking)
     .delete(deleteBooking);
 
 router.route('/bookings/:id/status')
