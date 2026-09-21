@@ -1,5 +1,6 @@
 import express from "express";
 import { protect } from "../middleware/authMiddleware.js";
+import { requireActiveSubscription, requireSubscriptionOrPaidJob } from "../middleware/subscriptionMiddleware.js";
 import {
     getSchedules,
     getScheduleStats,
@@ -17,25 +18,25 @@ import {
 const router = express.Router();
 
 // New Unified & Authenticated Endpoints (Recommended)
-router.get("/", protect, getSchedules);
-router.get("/stats", protect, getScheduleStats);
-router.get("/day", protect, getScheduleByDay);
-router.get("/week", protect, getScheduleByWeek);
-router.get("/month", protect, getScheduleByMonth);
-router.get("/today", protect, getTodaySchedule);
-router.get("/upcoming", protect, getUpcomingServices);
+router.get("/", protect, requireActiveSubscription, getSchedules);
+router.get("/stats", protect, requireActiveSubscription, getScheduleStats);
+router.get("/day", protect, requireActiveSubscription, getScheduleByDay);
+router.get("/week", protect, requireActiveSubscription, getScheduleByWeek);
+router.get("/month", protect, requireActiveSubscription, getScheduleByMonth);
+router.get("/today", protect, requireActiveSubscription, getTodaySchedule);
+router.get("/upcoming", protect, requireActiveSubscription, getUpcomingServices);
 
 // Legacy/Compatibility support (Still protected)
-router.get("/employee/:empId", protect, getSchedules);
-router.get("/employee/:empId/stats", protect, getScheduleStats);
-router.get("/employee/:empId/day", protect, getScheduleByDay);
-router.get("/employee/:empId/week", protect, getScheduleByWeek);
-router.get("/employee/:empId/month", protect, getScheduleByMonth);
+router.get("/employee/:empId", protect, requireActiveSubscription, getSchedules);
+router.get("/employee/:empId/stats", protect, requireActiveSubscription, getScheduleStats);
+router.get("/employee/:empId/day", protect, requireActiveSubscription, getScheduleByDay);
+router.get("/employee/:empId/week", protect, requireActiveSubscription, getScheduleByWeek);
+router.get("/employee/:empId/month", protect, requireActiveSubscription, getScheduleByMonth);
 
 // Actions
-router.patch("/:id/status", protect, updateServiceStatus);
-router.patch("/:id/start", protect, startService);
-router.patch("/:id/complete", protect, completeService);
-router.patch("/:id/reschedule", protect, rescheduleService);
+router.patch("/:id/status", protect, requireSubscriptionOrPaidJob, updateServiceStatus);
+router.patch("/:id/start", protect, requireSubscriptionOrPaidJob, startService);
+router.patch("/:id/complete", protect, requireSubscriptionOrPaidJob, completeService);
+router.patch("/:id/reschedule", protect, requireSubscriptionOrPaidJob, rescheduleService);
 
 export default router;

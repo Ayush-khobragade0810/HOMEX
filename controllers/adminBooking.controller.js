@@ -5,6 +5,10 @@ import Notification from '../models/Notification.js';
 import { emitBookingUpdate, sendNotification, cache } from "../utils/helpers.js";
 import { sendEmail, getAssignmentEmailTemplate, getStatusUpdateEmailTemplate } from '../services/emailService.js';
 import { generateInvoiceHTML } from '../utils/invoiceTemplate.js';
+import { canReceiveJobs, SUBSCRIPTION_ASSIGN_ERROR } from '../middleware/subscriptionMiddleware.js';
+import { refundOnReassign } from '../services/serviceFeeService.js';
+import { availabilityBlockReason } from '../utils/availability.js';
+import { copyableAvatar } from '../utils/avatarStorage.js';
 import { computeBilling } from '../utils/billing.js';
 
 // ======================================
@@ -761,11 +765,27 @@ export const assignBooking = async (req, res) => {
 
         if (!employee) return res.status(404).json({ success: false, message: 'Employee not found' });
 
+        if (!(await canReceiveJobs(employee))) {
+            return res.status(400).json({ success: false, code: 'SUBSCRIPTION_REQUIRED', message: SUBSCRIPTION_ASSIGN_ERROR });
+        }
+
+        // Respect the employee's own availability (switch + working days/hours).
+        const unavailable = availabilityBlockReason(
+            employee.availability,
+            typeof booking.slotStartsAt === 'function' ? booking.slotStartsAt() : null
+        );
+        if (unavailable) {
+            return res.status(400).json({ success: false, code: 'EMPLOYEE_UNAVAILABLE', message: unavailable });
+        }
+
+        // Taking the job away from an employee who already paid its fee refunds them.
+        await refundOnReassign(booking._id, employee._id);
+
         const technicianDetails = {
             technicianId: employee._id,
             name: employee.name || employee.empName,
             phone: employee.phone,
-            avatar: employee.avatar,
+            avatar: copyableAvatar(employee.avatar),
             rating: employee.stats?.rating || employee.rating || 5,
             assignedAt: new Date()
         };
@@ -868,6 +888,26 @@ const buildInvoiceData = (booking) => {
     // invoice itemises additional charges and shows recalculated totals.
     formattedData.extraServices = booking.extraServices || [];
     formattedData.billing = booking.billing || null;
+
+    // Payment particulars — a bill that says "PAID" should also say how and when.
+    formattedData.paymentMethod = booking.payment?.method || '';
+    formattedData.transactionId = booking.payment?.transactionId || '';
+    formattedData.paidAt = booking.payment?.paidAt || null;
+
+    // Full service address, not just the street line.
+    formattedData.landmark = booking.location?.landmark || '';
+    formattedData.pincode = booking.location?.pincode || '';
+
+    // Who actually performed the job.
+    formattedData.technicianName = booking.assignedTo?.name || '';
+    formattedData.technicianPhone = booking.assignedTo?.phone || '';
+
+    formattedData.serviceDescription = booking.serviceDetails?.description || '';
+
+    // Customer-facing notes ONLY. `adminNotes` is internal (see the Booking
+    // model) and must never reach a document the customer downloads.
+    formattedData.customerNotes = booking.notes || booking.customerNotes || '';
+
     return formattedData;
 };
 

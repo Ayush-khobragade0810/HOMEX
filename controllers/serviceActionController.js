@@ -7,6 +7,7 @@ import UpcomingPayment from "../models/UpcomingPayment.js";
 import { emitBookingUpdate } from "../socket.js";
 import mongoose from "mongoose";
 import { computeBilling, normalizeExtraService, bookingTotals } from "../utils/billing.js";
+import { chargeForStatusChange, employeeCancellationFields } from "../services/serviceFeeService.js";
 
 const parseClockToMinutes = (value) => {
     if (!value) return null;
@@ -68,9 +69,12 @@ export const updateServiceStatus = async (req, res) => {
         const bookingStatus = statusMap[status] || status.toUpperCase();
         const query = mongoose.Types.ObjectId.isValid(id) ? { _id: id } : { bookingId: id };
 
+        const fee = await chargeForStatusChange(req, id, bookingStatus);
+        if (!fee.ok) return res.status(fee.status).json(fee.body);
+
         const booking = await Booking.findOneAndUpdate(
             query,
-            { status: bookingStatus, updatedAt: new Date() },
+            { status: bookingStatus, updatedAt: new Date(), ...employeeCancellationFields(req, bookingStatus) },
             { new: true }
         ).populate('userId');
 
@@ -89,6 +93,9 @@ export const confirmService = async (req, res) => {
         const { id } = req.params;
         const { default: Booking } = await import('../models/Booking.js');
         const query = mongoose.Types.ObjectId.isValid(id) ? { _id: id } : { bookingId: id };
+
+        const fee = await chargeForStatusChange(req, id, 'ACCEPTED');
+        if (!fee.ok) return res.status(fee.status).json(fee.body);
 
         const booking = await Booking.findOneAndUpdate(
             query,
@@ -119,6 +126,9 @@ export const startService = async (req, res) => {
         const { startTime } = req.body;
         const { default: Booking } = await import('../models/Booking.js');
         const query = mongoose.Types.ObjectId.isValid(id) ? { _id: id } : { bookingId: id };
+
+        const fee = await chargeForStatusChange(req, id, 'IN_PROGRESS');
+        if (!fee.ok) return res.status(fee.status).json(fee.body);
 
         const booking = await Booking.findOneAndUpdate(
             query,
@@ -152,6 +162,9 @@ export const completeService = async (req, res) => {
 
         const existing = await Booking.findOne(query).lean();
         if (!existing) return res.status(404).json({ message: "Booking not found" });
+
+        const fee = await chargeForStatusChange(req, id, 'COMPLETED');
+        if (!fee.ok) return res.status(fee.status).json(fee.body);
 
         // Append any extra services submitted alongside completion. Duplicates
         // are intentionally kept as separate line items (business rule).
@@ -496,6 +509,10 @@ export const acceptAssignment = async (req, res) => {
         const { default: Booking } = await import('../models/Booking.js');
         const query = mongoose.Types.ObjectId.isValid(id) ? { _id: id } : { bookingId: id };
 
+        // Takes the service fee (and checks the booking is assigned to this employee).
+        const fee = await chargeForStatusChange(req, id, 'ACCEPTED');
+        if (!fee.ok) return res.status(fee.status).json(fee.body);
+
         const booking = await Booking.findOneAndUpdate(
             query,
             { status: 'ACCEPTED' },
@@ -604,6 +621,7 @@ export const getAssigned = async (req, res) => {
             'assignedTo.technicianId': req.user.id,
             status: { $in: ['ACCEPTED', 'CONFIRMED', 'IN_PROGRESS', 'NAVIGATING', 'started', 'in_progress'] }
         })
+        .select('-assignedTo.avatar')
         .populate('userId', 'name phone address')
         .populate('serviceId', 'title category price duration')
         .populate('location.area')
@@ -645,6 +663,7 @@ export const getPending = async (req, res) => {
             'assignedTo.technicianId': req.user.id,
             status: { $in: ['ASSIGNED', 'assigned'] }
         })
+        .select('-assignedTo.avatar')
         .populate('userId', 'name phone address')
         .populate('serviceId', 'title category')
         .populate('location.area')
@@ -682,6 +701,7 @@ export const getCompleted = async (req, res) => {
             'assignedTo.technicianId': req.user.id,
             status: { $in: ['COMPLETED', 'completed'] }
         })
+        .select('-assignedTo.avatar')
         .populate('userId', 'name phone address')
         .populate('serviceId', 'title category')
         .populate('location.area')
@@ -718,7 +738,7 @@ export const getCompleted = async (req, res) => {
 export const getInProgress = async (req, res) => {
     try {
         const { default: Booking } = await import('../models/Booking.js');
-        const employee = await Employee.findOne({ email: req.user.email }).lean();
+        const employee = await Employee.findOne({ email: req.user.email }).select('empId').lean();
         const numericEmpId = employee?.empId;
 
         const [bookings, services] = await Promise.all([
@@ -726,7 +746,8 @@ export const getInProgress = async (req, res) => {
                 'assignedTo.technicianId': req.user.id,
                 status: { $in: ['IN_PROGRESS', 'NAVIGATING', 'STARTED', 'in_progress', 'en_route'] }
             })
-            .populate('userId', 'name phone address')
+            .select('-assignedTo.avatar')
+        .populate('userId', 'name phone address')
             .populate('serviceId', 'title category duration price')
             .populate('location.area')
             .select('-history -metadata')

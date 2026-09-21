@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import Employee from "../models/adminEmployee.js";
 import Booking from "../models/Booking.js";
 import { cache } from "../utils/helpers.js";
+import { persistAvatar } from '../utils/avatarStorage.js';
 
 /**
  * @desc    Search and list employees with aggregated stats
@@ -223,32 +224,30 @@ export const getEmployeeProfile = async (req, res) => {
             await employee.save();
         }
 
-        // Count completed bookings dynamically
-        const completedBookings = await Booking.countDocuments({
+        // Completed work: the bookings themselves cover both the count and the
+        // earnings, so fetch them once and count the legacy services alongside
+        // (one round trip instead of three — the database is remote).
+        const completedBookingFilter = {
             $or: [
                 { 'assignedTo.technicianId': employee._id },
                 { assignedTo: employee._id }
             ],
             status: { $regex: /completed/i }
-        });
+        };
 
-        // Count legacy completed services dynamically
         const { default: Service } = await import('../models/Service.js');
-        const completedServices = await Service.countDocuments({
-            empId: employee.empId,
-            status: { $regex: /completed/i }
-        });
+        const [bookingsList, servicesList] = await Promise.all([
+            Booking.find(completedBookingFilter)
+                .select('serviceDetails.price payment.amount billing extraServices')
+                .lean(),
+            Service.find({ empId: employee.empId, status: { $regex: /completed/i } })
+                .select('actualEarnings estimatedEarnings')
+                .lean()
+        ]);
 
+        const completedBookings = bookingsList.length;
+        const completedServices = servicesList.length;
         const totalCompletedJobs = completedBookings + completedServices;
-
-        // Calculate dynamic total earnings
-        const bookingsList = await Booking.find({
-            $or: [
-                { 'assignedTo.technicianId': employee._id },
-                { assignedTo: employee._id }
-            ],
-            status: { $regex: /completed/i }
-        }).lean();
 
         let dynamicEarnings = 0;
         bookingsList.forEach(b => {
@@ -261,10 +260,6 @@ export const getEmployeeProfile = async (req, res) => {
             dynamicEarnings += totalPrice;
         });
 
-        const servicesList = await Service.find({
-            empId: employee.empId,
-            status: { $regex: /completed/i }
-        }).lean();
         servicesList.forEach(s => {
             dynamicEarnings += (s.actualEarnings || s.estimatedEarnings || 0);
         });
@@ -389,7 +384,8 @@ export const updateEmployeeProfile = async (req, res) => {
         if (address !== undefined) updateData.address = address;
         if (specialties !== undefined) updateData.specialties = specialties;
         if (certifications !== undefined) updateData.certifications = certifications;
-        if (avatar) updateData.avatar = avatar;
+        // Base64 avatars are written to /uploads/avatars; only the URL is stored.
+        if (avatar) updateData.avatar = await persistAvatar(avatar, `emp-${req.params.id || 'x'}`);
         if (settings) updateData.settings = settings;
 
         const idParam = req.params.id;

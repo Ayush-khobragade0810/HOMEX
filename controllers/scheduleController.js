@@ -4,6 +4,7 @@ import mongoose from "mongoose";
 import moment from "moment";
 import { computeBilling, bookingTotals } from "../utils/billing.js";
 
+import { chargeForStatusChange, employeeCancellationFields } from "../services/serviceFeeService.js";
 const getFullAddress = (b) => {
     if (!b) return '';
     const loc = b.location;
@@ -111,21 +112,22 @@ const resolveToUserId = async (idInput) => {
 
         // Case 1: ObjectId (could be Employee._id or User._id)
         if (mongoose.Types.ObjectId.isValid(idInput)) {
-            const emp = await Employee.findById(idInput);
+            // Only the email is needed; `avatar` can be a large inline image.
+            const emp = await Employee.findById(idInput).select('email').lean();
             if (emp) {
-                const user = await User.findOne({ email: emp.email });
+                const user = await User.findOne({ email: emp.email }).select('_id').lean();
                 if (user) return user._id;
             }
-            const user = await User.findById(idInput);
+            const user = await User.findById(idInput).select('_id').lean();
             if (user) return user._id;
         }
 
         // Case 2: Numeric ID (empId string or number)
         const numericId = parseInt(idInput);
         if (!isNaN(numericId)) {
-            const emp = await Employee.findOne({ empId: numericId });
+            const emp = await Employee.findOne({ empId: numericId }).select('email').lean();
             if (emp) {
-                const user = await User.findOne({ email: emp.email });
+                const user = await User.findOne({ email: emp.email }).select('_id').lean();
                 if (user) return user._id;
             }
         }
@@ -209,11 +211,14 @@ export const getSchedules = async (req, res) => {
         // --- EXECUTE ---
         const [bookings, services] = await Promise.all([
             Booking.find(bookingQuery)
+                // assignedTo.avatar is unused and can hold a large inline image.
+                .select('-assignedTo.avatar')
                 .populate('userId', 'name phone address location')
                 .populate('location.area')
                 .lean(),
             numericEmpId ? Service.find(serviceQuery).lean() : Promise.resolve([])
         ]);
+
 
         // --- MAP & MERGE ---
         let mappedBookings = bookings.map(booking => {
@@ -387,9 +392,13 @@ export const updateServiceStatus = async (req, res) => {
         const { status, notes, actualEarnings } = req.body;
         const query = mongoose.Types.ObjectId.isValid(id) ? { _id: id } : { bookingId: id };
 
+        const fee = await chargeForStatusChange(req, id, status);
+        if (!fee.ok) return res.status(fee.status).json(fee.body);
+
         const updateData = {
             status: status?.toUpperCase(),
-            updatedAt: new Date()
+            updatedAt: new Date(),
+            ...employeeCancellationFields(req, status?.toUpperCase())
         };
         if (notes) updateData.notes = notes;
         if (actualEarnings !== undefined && actualEarnings !== null && actualEarnings !== '') {
@@ -432,6 +441,10 @@ export const startService = async (req, res) => {
     try {
         const { id } = req.params;
         const query = mongoose.Types.ObjectId.isValid(id) ? { _id: id } : { bookingId: id };
+
+        const fee = await chargeForStatusChange(req, id, 'IN_PROGRESS');
+        if (!fee.ok) return res.status(fee.status).json(fee.body);
+
         let result = await Booking.findOneAndUpdate(query, { status: 'IN_PROGRESS', startedAt: new Date(), updatedAt: new Date() }, { new: true });
         if (!result) result = await Service.findOneAndUpdate(mongoose.Types.ObjectId.isValid(id) ? { _id: id } : { serviceId: id }, { status: 'in_progress', updatedAt: new Date() }, { new: true });
         if (!result) return res.status(404).json({ message: "Service not found" });
@@ -447,6 +460,9 @@ export const completeService = async (req, res) => {
         const { id } = req.params;
         const { actualEarnings, notes } = req.body;
         const query = mongoose.Types.ObjectId.isValid(id) ? { _id: id } : { bookingId: id };
+
+        const fee = await chargeForStatusChange(req, id, 'COMPLETED');
+        if (!fee.ok) return res.status(fee.status).json(fee.body);
 
         // Recompute the invoice so extras added during the job are reflected in
         // the stored breakdown. When the technician does not report a collected

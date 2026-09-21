@@ -1,6 +1,8 @@
 // controllers/employeeController.js
 import Employee from '../models/adminEmployee.js';
 import mongoose from 'mongoose';
+import { persistAvatar } from '../utils/avatarStorage.js';
+import { describeAvailability, validateAvailability } from '../utils/availability.js';
 
 export const getProfile = async (req, res) => {
   // Use findOne with the correct query if req.user.id maps to _id or empId
@@ -256,7 +258,8 @@ export const updateProfile = async (req, res) => {
     if (bio) updateData.bio = bio;
     if (specialties) updateData.specialties = specialties;
     if (certifications) updateData.certifications = certifications;
-    if (avatar) updateData.avatar = avatar;
+    // Base64 avatars are written to /uploads/avatars; only the URL is stored.
+    if (avatar) updateData.avatar = await persistAvatar(avatar, `emp-${req.params.id || req.user?.empId || 'x'}`);
     if (email) updateData.email = email; // Allow email update
 
     const updatedEmployee = await Employee.findOneAndUpdate(
@@ -303,5 +306,52 @@ export const updateProfile = async (req, res) => {
   } catch (err) {
     console.error('Update profile error:', err);
     res.status(500).json({ message: 'Failed to update profile', error: err.message });
+  }
+};
+
+// @desc    The logged-in employee's availability (switch + working days/hours)
+// @route   GET /api/employees/availability
+// @access  Private (employee)
+export const getMyAvailability = async (req, res) => {
+  try {
+    const employee = await Employee.findById(req.user.id).select('availability').lean();
+    if (!employee) return res.status(404).json({ success: false, message: 'Employee profile not found' });
+    res.json({ success: true, availability: describeAvailability(employee.availability) });
+  } catch (err) {
+    console.error('Get availability error:', err);
+    res.status(500).json({ success: false, message: 'Could not load your availability' });
+  }
+};
+
+// @desc    Update it
+// @route   PUT /api/employees/availability
+// @access  Private (employee)
+export const updateMyAvailability = async (req, res) => {
+  try {
+    const { errors, value } = validateAvailability(req.body);
+    if (Object.keys(errors).length) {
+      return res.status(400).json({
+        success: false,
+        message: Object.values(errors)[0],
+        errors
+      });
+    }
+
+    const employee = await Employee.findByIdAndUpdate(
+      req.user.id,
+      { $set: { availability: { ...value, updatedAt: new Date() } } },
+      { new: true, projection: { availability: 1 } }
+    ).lean();
+
+    if (!employee) return res.status(404).json({ success: false, message: 'Employee profile not found' });
+
+    res.json({
+      success: true,
+      message: value.available ? 'Availability updated' : 'You are marked unavailable',
+      availability: describeAvailability(employee.availability)
+    });
+  } catch (err) {
+    console.error('Update availability error:', err);
+    res.status(500).json({ success: false, message: 'Could not save your availability' });
   }
 };

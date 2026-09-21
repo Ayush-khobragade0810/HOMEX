@@ -6,6 +6,9 @@ import Service from '../models/Service.js';
 import Notification from '../models/Notification.js';
 import Employee from '../models/adminEmployee.js';
 import { adminAuth as authenticateAdmin } from '../middleware/authMiddleware.js';
+import { canReceiveJobs, SUBSCRIPTION_ASSIGN_ERROR } from '../middleware/subscriptionMiddleware.js';
+import { refundOnReassign } from '../services/serviceFeeService.js';
+import { availabilityBlockReason } from '../utils/availability.js';
 import { getDashboardStats, getUserStats, getAllUsers } from '../controllers/adminController.js';
 
 const router = express.Router();
@@ -747,6 +750,15 @@ const assignBookingHandler = async (req, res) => {
       return res.status(404).json({ success: false, error: "Employee not found" });
     }
 
+    if (!(await canReceiveJobs(employee))) {
+      return res.status(400).json({
+        success: false,
+        code: "SUBSCRIPTION_REQUIRED",
+        error: SUBSCRIPTION_ASSIGN_ERROR,
+        message: SUBSCRIPTION_ASSIGN_ERROR
+      });
+    }
+
     // Check if employee is active
     if (employee.status !== 'Active') {
       return res.status(400).json({
@@ -755,6 +767,18 @@ const assignBookingHandler = async (req, res) => {
         employeeStatus: employee.status
       });
     }
+
+    // Respect the employee's own availability (switch + working days/hours).
+    const unavailable = availabilityBlockReason(
+      employee.availability,
+      typeof booking.slotStartsAt === 'function' ? booking.slotStartsAt() : null
+    );
+    if (unavailable) {
+      return res.status(400).json({ success: false, code: "EMPLOYEE_UNAVAILABLE", error: unavailable, message: unavailable });
+    }
+
+    // Taking the job away from an employee who already paid its fee refunds them.
+    await refundOnReassign(booking._id, employee._id);
 
     // 3. Update Booking
     // Keep status as PENDING so employee can ACCEPT it. 

@@ -3,6 +3,7 @@ import User from '../models/User.js';
 import logger from '../utils/logger.js';
 
 let ioInstance = null;
+const ADMIN_ROOM = 'admins';
 const connectedUsers = new Map(); // userId -> socket data
 const userRooms = new Map(); // userId -> Set of room names
 const roomUsers = new Map(); // roomName -> Set of userIds
@@ -83,6 +84,12 @@ class SocketService {
         // Join user's personal room
         socket.join(`user:${userId}`);
         this.joinRoom(userId, `user:${userId}`);
+
+        // Admins share one room so the admin panel gets live updates.
+        if (socket.userRole === 'admin') {
+            socket.join(ADMIN_ROOM);
+            this.joinRoom(userId, ADMIN_ROOM);
+        }
 
         // Update user's socketId in database - using model
         User.findByIdAndUpdate(userId, {
@@ -258,6 +265,11 @@ class SocketService {
         ioInstance.to(roomName).emit(event, data);
         logger.debug({ roomName, event }, 'Emitted to room');
         return true;
+    }
+
+    /** Broadcast to every connected admin (admin panel live updates). */
+    emitToAdmins(event, data) {
+        return this.emitToRoom(ADMIN_ROOM, event, { ...data, at: new Date().toISOString() });
     }
 
     emitToUserByBooking(bookingId, event, data) {

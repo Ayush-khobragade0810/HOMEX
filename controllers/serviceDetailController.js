@@ -3,6 +3,7 @@ import ServiceNote from "../models/ServiceNote.js";
 import Booking from "../models/Booking.js";
 import mongoose from "mongoose";
 import { computeBilling, bookingTotals } from "../utils/billing.js";
+import { chargeForStatusChange, employeeCancellationFields } from "../services/serviceFeeService.js";
 
 const getFullAddress = (b) => {
     if (!b) return '';
@@ -224,6 +225,14 @@ export const updateServiceInfo = async (req, res) => {
             }
         });
 
+        // Moving a job forward takes the employee's service fee, same as the
+        // accept endpoints (this route must not be a way around it).
+        if (filteredUpdate.status) {
+            const nextStatus = String(filteredUpdate.status) === 'confirmed' ? 'ACCEPTED' : filteredUpdate.status;
+            const fee = await chargeForStatusChange(req, serviceId, nextStatus);
+            if (!fee.ok) return res.status(fee.status).json(fee.body);
+        }
+
         let service = null;
         if (!isNaN(Number(serviceId))) {
             service = await Service.findOneAndUpdate(
@@ -248,6 +257,7 @@ export const updateServiceInfo = async (req, res) => {
                     'accepted': 'ACCEPTED'
                 };
                 bookingUpdate.status = statusMap[filteredUpdate.status] || filteredUpdate.status.toUpperCase();
+                Object.assign(bookingUpdate, employeeCancellationFields(req, bookingUpdate.status));
             }
             if (filteredUpdate.notes) {
                 bookingUpdate.technicianNotes = filteredUpdate.notes;

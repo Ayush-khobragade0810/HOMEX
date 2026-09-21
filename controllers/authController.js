@@ -80,6 +80,23 @@ export const register = async (req, res) => {
   try {
     const { name, email, phone, password, role } = req.body;
 
+    // Mobile number is mandatory at signup
+    const normalizedPhone = (phone || '').toString().trim();
+    if (!normalizedPhone) {
+      return res.status(400).json({
+        success: false,
+        message: 'Mobile number is required',
+        field: 'phone'
+      });
+    }
+    if (!/^[0-9]{10}$/.test(normalizedPhone)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please enter a valid 10-digit mobile number',
+        field: 'phone'
+      });
+    }
+
     // Check if user already exists
     const normalizedEmail = email.toLowerCase();
     const existingEmail = await User.findOne({ email: normalizedEmail });
@@ -90,22 +107,21 @@ export const register = async (req, res) => {
       });
     }
 
-    // Check availability of phone only if provided
-    if (phone) {
-      const existingPhone = await User.findOne({ phone });
-      if (existingPhone) {
-        return res.status(400).json({
-          success: false,
-          message: 'User with this phone already exists'
-        });
-      }
+    // Mobile number must be unique
+    const existingPhone = await User.findOne({ phone: normalizedPhone });
+    if (existingPhone) {
+      return res.status(400).json({
+        success: false,
+        message: 'User with this phone already exists',
+        field: 'phone'
+      });
     }
 
     // Create user
     const user = await User.create({
       name,
       email: normalizedEmail,
-      phone,
+      phone: normalizedPhone,
       password,
       role: (role || 'user').toLowerCase(),
       metadata: {
@@ -225,18 +241,27 @@ export const signup = register;
 // @access  Public
 export const login = async (req, res) => {
   const startTime = Date.now(); // For timing attack prevention
-  const { email, password } = req.body;
+  const { email, phone, identifier, password } = req.body;
   const ip = normalizeIP(req.ip);
   const userAgent = req.get('User-Agent');
 
+  // Users may sign in with either their email address or their mobile number
+  const loginId = (identifier || email || phone || '').toString().trim();
+  const isPhoneLogin = /^[0-9]{10}$/.test(loginId);
+  const loginMethod = isPhoneLogin ? 'phone' : 'email';
+
   // Input validation
-  if (!email || !password) {
-    return res.status(400).json({ message: 'Email and password are required' });
+  if (!loginId || !password) {
+    return res.status(400).json({ message: 'Email or mobile number and password are required' });
   }
 
   try {
-    // 1. Find user (with password field explicitly selected)
-    const user = await User.findOne({ email: email.toLowerCase().trim() })
+    // 1. Find user by mobile number or email (with password field explicitly selected)
+    const query = isPhoneLogin
+      ? { phone: loginId }
+      : { email: loginId.toLowerCase() };
+
+    const user = await User.findOne(query)
       .select('+password +failedAttempts +lockedUntil +loginCount +refreshTokens');
 
     // 2. Check if user exists (with timing attack protection)
@@ -247,7 +272,9 @@ export const login = async (req, res) => {
         auditLog({
           event: 'login_failed',
           reason: 'user_not_found',
-          email: email.toLowerCase().trim(),
+          email: isPhoneLogin ? undefined : loginId.toLowerCase(),
+          identifier: loginId,
+          loginMethod,
           ip,
           userAgent
         })
@@ -269,6 +296,7 @@ export const login = async (req, res) => {
         event: 'login_blocked',
         reason: 'account_locked',
         userId: user._id,
+        loginMethod,
         ip,
         userAgent
       });
@@ -336,6 +364,7 @@ export const login = async (req, res) => {
       event: 'login_success',
       userId: user._id,
       role: user.role,
+      loginMethod,
       ip,
       userAgent,
       loginCount: user.loginCount + 1
@@ -394,7 +423,8 @@ export const login = async (req, res) => {
     await auditLog({
       event: 'login_error',
       error: error.message,
-      email: email?.toLowerCase()?.trim(),
+      identifier: loginId,
+      loginMethod,
       ip,
       userAgent,
       timestamp: new Date()
@@ -633,6 +663,7 @@ export const employeeLogin = async (req, res) => {
         _id: user._id,
         id: user._id,
         email: user.email,
+        phone: user.phone,
         role: user.role,
         name: user.name
       }

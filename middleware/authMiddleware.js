@@ -20,13 +20,18 @@ export const protect = async (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'dev-secret');
 
     // Strategy 1: Try to find Employee directly (for employee login)
-    let employee = await Employee.findById(decoded.id);
+    // Only the fields this middleware and req.user need. Without a projection
+    // every authenticated request drags the whole record over the wire,
+    // including an inline avatar image on older records.
+    const EMPLOYEE_FIELDS = 'empId empName name email role status';
+    let employee = await Employee.findById(decoded.id).select(EMPLOYEE_FIELDS);
     let user = null;
 
     // Strategy 2: If not found, check if it's a User who is an employee
     if (!employee) {
       const { default: User } = await import('../models/User.js'); // Dynamic import to avoid circular dependency
-      user = await User.findById(decoded.id);
+      // refreshTokens is needed by logout (req.user.revokeRefreshToken()).
+      user = await User.findById(decoded.id).select('name email phone role avatar isActive refreshTokens');
 
       if (user) {
       } else {
@@ -46,12 +51,12 @@ export const protect = async (req, res, next) => {
         if (user.role === 'employee' || user.role === 'admin' || user.role === 'user') {
           // Find the linked employee record by email only if they ARE an employee
           if (user.role === 'employee') {
-            employee = await Employee.findOne({ email: user.email });
+            employee = await Employee.findOne({ email: user.email }).select(EMPLOYEE_FIELDS);
 
             if (!employee) {
 
               // EMERGENCY FALLBACK: Try to find by Name
-              const potentialMatch = await Employee.findOne({ empName: user.name });
+              const potentialMatch = await Employee.findOne({ empName: user.name }).select(EMPLOYEE_FIELDS);
 
               if (potentialMatch) {
                 user.email = potentialMatch.email;

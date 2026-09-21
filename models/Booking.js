@@ -217,6 +217,17 @@ const bookingSchema = new mongoose.Schema({
     userAgent: String,
     appVersion: String,
     referralCode: String
+  },
+  // Fee taken from the employee's subscription balance when they accepted this
+  // booking. Also the lock that guarantees one charge per booking — see
+  // services/serviceFeeService.js.
+  serviceFee: {
+    status: { type: String, enum: ['charging', 'charged', 'refunded'] },
+    employee: { type: mongoose.Schema.Types.ObjectId, ref: 'Employee' },
+    amount: Number,
+    chargedAt: Date,
+    refundedAt: Date,
+    refundReason: String
   }
 }, {
   timestamps: true,
@@ -229,6 +240,73 @@ bookingSchema.plugin(AutoIncrement, {
   inc_field: 'bookingCounter',
   id: 'booking_seq',
   start_seq: 1000
+});
+
+// Refund the employee's service fee whenever a booking they paid for ends up
+// cancelled by anyone but them. Done in model hooks because cancellations
+// happen in many controllers; the refund itself is idempotent.
+const touchesStatus = (update = {}) =>
+  'status' in update || 'status' in (update.$set || {});
+
+const refundIfCancelled = async (filter) => {
+  try {
+    const { refundFeesForCancelledBookings } = await import('../services/serviceFeeService.js');
+    await refundFeesForCancelledBookings(filter);
+  } catch (err) {
+    logger.error({ err: err.message }, 'Service fee refund check failed');
+  }
+};
+
+bookingSchema.post('save', async function (doc) {
+  if (doc.serviceFee?.status === 'charged') await refundIfCancelled({ _id: doc._id });
+});
+
+bookingSchema.post(['findOneAndUpdate', 'updateOne', 'updateMany'], async function () {
+  if (touchesStatus(this.getUpdate())) await refundIfCancelled(this.getFilter());
+});
+
+// Live admin panel: broadcast every booking create/update, whichever
+// controller made it. Fire-and-forget so a socket problem never slows a write.
+const broadcastToAdmins = (event, payload) => {
+  import('../utils/adminEvents.js')
+    .then(({ notifyAdmins }) => notifyAdmins(event, payload))
+    .catch(() => {});
+};
+
+/** The single booking id a query targets, if it targets exactly one. */
+const idFromFilter = (filter = {}) => {
+  const id = filter._id;
+  if (typeof id === 'string') return id;
+  if (id instanceof mongoose.Types.ObjectId) return String(id);
+  return undefined; // no id, or an operator such as { $in: [...] }
+};
+
+bookingSchema.pre('save', function (next) {
+  this.$locals.wasNew = this.isNew;
+  next();
+});
+
+bookingSchema.post('save', function (doc) {
+  const base = { id: String(doc._id), bookingId: doc.bookingId, status: doc.status };
+  if (doc.$locals?.wasNew) {
+    broadcastToAdmins('admin:booking:new', {
+      ...base,
+      title: doc.serviceDetails?.title,
+      customer: doc.contactIdInfo?.fullName
+    });
+  }
+  broadcastToAdmins('admin:bookings:changed', { ...base, type: doc.$locals?.wasNew ? 'created' : 'updated' });
+});
+
+bookingSchema.post(['findOneAndUpdate', 'updateOne', 'updateMany'], function (result) {
+  const filter = this.getFilter() || {};
+  const id = idFromFilter(filter) || (result && result._id ? String(result._id) : undefined);
+  broadcastToAdmins('admin:bookings:changed', {
+    id,
+    bookingId: typeof filter.bookingId === 'string' ? filter.bookingId : result?.bookingId,
+    status: result?.status,
+    type: 'updated'
+  });
 });
 
 // Performance indexes
@@ -337,10 +415,51 @@ bookingSchema.methods.canReschedule = function () {
   return true;
 };
 
+// Time slots ("13:00-15:00", or "01:00 PM - 03:00 PM") are local business time
+// on preferredDate's calendar day, which is stored as UTC midnight.
+const SLOT_TZ_OFFSET_MINUTES = Number(process.env.BUSINESS_TZ_OFFSET_MINUTES ?? 330); // IST
+const CUSTOMER_CANCELLABLE = ['PENDING', 'CONFIRMED', 'ASSIGNED', 'ACCEPTED', 'RESCHEDULED'];
+const CANCEL_CUTOFF_MS = 60 * 60 * 1000; // no cancelling in the last hour before the slot
+
+/** When the booked slot starts, or null if there's no date. */
+bookingSchema.methods.slotStartsAt = function () {
+  const day = this.schedule?.preferredDate ? new Date(this.schedule.preferredDate) : null;
+  if (!day || Number.isNaN(day.getTime())) return null;
+
+  let hours = 0;
+  let minutes = 0;
+  const m = /^\s*(\d{1,2}):(\d{2})\s*(AM|PM)?/i.exec(this.schedule?.timeSlot || '');
+  if (m) {
+    hours = Number(m[1]);
+    minutes = Number(m[2]);
+    if (m[3]) {
+      if (hours === 12) hours = 0;
+      if (m[3].toUpperCase() === 'PM') hours += 12;
+    }
+  }
+
+  return new Date(
+    Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(), hours, minutes) -
+    SLOT_TZ_OFFSET_MINUTES * 60 * 1000
+  );
+};
+
+/** Why the customer can't cancel right now, or null if they can. */
+bookingSchema.methods.cancelBlockReason = function (now = new Date()) {
+  const status = String(this.status || '').toUpperCase();
+  if (status === 'CANCELLED' || status === 'CANCELED') return 'This booking is already cancelled.';
+  if (!CUSTOMER_CANCELLABLE.includes(status)) {
+    return 'This booking can no longer be cancelled because the service has already started or finished.';
+  }
+  const start = this.slotStartsAt();
+  if (start && start - now < CANCEL_CUTOFF_MS) {
+    return 'Bookings can only be cancelled more than 1 hour before the scheduled time.';
+  }
+  return null;
+};
+
 bookingSchema.methods.canCancel = function () {
-  if (!['pending', 'confirmed', 'assigned'].includes(this.status)) return false;
-  if (this.timeUntilBooking < 1) return false; // Less than 1 hour before
-  return true;
+  return this.cancelBlockReason() === null;
 };
 
 bookingSchema.methods.assignTechnician = function (technician) {
@@ -352,7 +471,8 @@ bookingSchema.methods.assignTechnician = function (technician) {
     technicianId: technician._id,
     name: technician.name,
     phone: technician.phone,
-    avatar: technician.avatar,
+    // Inline data-URL avatars are not copied in: see utils/avatarStorage.js
+    avatar: /^data:/.test(String(technician.avatar || '')) ? undefined : technician.avatar,
     rating: technician.stats.rating,
     assignedAt: new Date()
   };
@@ -390,14 +510,17 @@ bookingSchema.methods.completeService = function (notes) {
 };
 
 bookingSchema.methods.cancelBooking = function (reason, cancelledBy = 'user') {
-  if (!this.canCancel()) {
-    throw new Error('Booking cannot be cancelled at this time');
-  }
+  const blocked = this.cancelBlockReason();
+  if (blocked) throw new Error(blocked);
 
-  this.status = 'cancelled';
+  const by = ['user', 'technician', 'admin', 'system'].includes(cancelledBy) ? cancelledBy : 'user';
+  this.status = 'CANCELLED';
   this.cancellationReason = reason;
-  this.cancelledBy = cancelledBy;
+  this.cancelledBy = by;
+  this.cancelledAt = new Date();
+  this.statusTimeline.push({ status: 'CANCELLED', updatedBy: by, note: reason || undefined });
 
+  // Saving triggers the post-save hook that refunds the employee's service fee.
   return this.save();
 };
 

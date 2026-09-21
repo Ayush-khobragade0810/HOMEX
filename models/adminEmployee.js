@@ -23,6 +23,17 @@ const employeeSchema = new mongoose.Schema({
     earnings: { type: Number, default: 0, required: true },
     status: { type: String, default: 'Active', enum: ['Active', 'Inactive'] },
 
+    // When this employee takes work. Set by the employee from their dashboard;
+    // admins can't assign a booking that falls outside it (see utils/availability.js).
+    availability: {
+        available: { type: Boolean, default: true },
+        // 0 = Sunday … 6 = Saturday
+        workingDays: { type: [Number], default: [1, 2, 3, 4, 5, 6] },
+        startTime: { type: String, default: '09:00' }, // local business time, HH:MM
+        endTime: { type: String, default: '18:00' },
+        updatedAt: Date
+    },
+
     // Other profile fields from your original schema
     address: String,
     joinDate: { type: Date, default: Date.now },
@@ -52,8 +63,50 @@ const employeeSchema = new mongoose.Schema({
         isDefault: { type: Boolean, default: false },
         addedAt: { type: Date, default: Date.now }
     }],
-    walletBalance: { type: Number, default: 0 } // Track withdrawable balance
+    walletBalance: { type: Number, default: 0 }, // Track withdrawable balance
+
+    // Paid subscription gating job access. Rules live in utils/subscription.js.
+    subscription: {
+        // Grandfathered employees (existed before subscriptions): full access,
+        // and no per-service fee since they never paid in a balance.
+        exempt: { type: Boolean, default: false },
+        // Prepaid credit in rupees. Top-ups add to it; each accepted service
+        // deducts the service fee. Only ever changed through
+        // services/serviceFeeService.js so it stays in step with the ledger.
+        balance: { type: Number, default: 0 },
+        // First approved payment. Having one grants dashboard access even when
+        // the balance is too low to take new services.
+        activatedAt: Date,
+        expiresAt: Date, // legacy (30-day model); no longer read
+        // Payment the employee reported, awaiting admin verification.
+        pendingRequest: {
+            transactionId: { type: String, trim: true },
+            paymentMethod: { type: String, enum: ['upi', 'bank', 'cash', 'other'] },
+            amount: Number,
+            paidOn: Date,
+            note: { type: String, trim: true },
+            submittedAt: Date
+        },
+        lastRejection: {
+            transactionId: String,
+            reason: String,
+            at: Date
+        },
+        history: [{
+            action: { type: String, enum: ['submitted', 'approved', 'rejected'], required: true },
+            transactionId: String,
+            paymentMethod: String,
+            amount: Number,
+            periodStart: Date,
+            periodEnd: Date,
+            reason: String,
+            by: { type: mongoose.Schema.Types.ObjectId },
+            at: { type: Date, default: Date.now }
+        }]
+    }
 });
+
+employeeSchema.index({ 'subscription.pendingRequest.submittedAt': 1 });
 
 // This plugin will automatically create and increment the empId
 employeeSchema.plugin(AutoIncrementPlugin, { inc_field: 'empId', start_seq: 101 });

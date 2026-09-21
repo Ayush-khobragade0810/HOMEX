@@ -10,6 +10,8 @@ import {
 import { protect } from "../middleware/authMiddleware.js";
 import {
     getEmployeeSettings,
+    getMyAvailability,
+    updateMyAvailability,
     updateEmployeeSettings,
     deactivateAccount
 } from "../controllers/employeeController.js";
@@ -24,6 +26,11 @@ router.get("/", searchEmployees);
 // Profile and Top Technicians (Employee specific)
 router.get("/profile", protect, getEmployeeProfile);
 router.get("/top-technicians", protect, getTopTechnicians);
+
+// Availability (the employee's own). Declared before "/:id" so the word
+// "availability" is not treated as an employee id.
+router.get("/availability", protect, getMyAvailability);
+router.put("/availability", protect, updateMyAvailability);
 
 // POST /api/employees
 router.post("/", createEmployee);

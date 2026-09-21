@@ -13,26 +13,96 @@ const esc = (value) =>
  * Utility to generate a professional HTML invoice for bookings
  * Now includes automated PDF download functionality
  */
+/**
+ * Seller details. Overridable via env so a deployment can carry its real
+ * registered address / GSTIN without a code change.
+ */
+const company = () => ({
+    name: process.env.INVOICE_COMPANY_NAME || 'HOMEX',
+    tagline: process.env.INVOICE_COMPANY_TAGLINE || 'Premium Home Services',
+    address: process.env.INVOICE_COMPANY_ADDRESS || '123 Service Street, Tech City',
+    phone: process.env.INVOICE_COMPANY_PHONE || '+91 98765 43210',
+    email: process.env.INVOICE_COMPANY_EMAIL || 'support@homex.com',
+    gstin: process.env.INVOICE_COMPANY_GSTIN || ''
+});
+
+const PAYMENT_METHOD_LABELS = {
+    online: 'Online',
+    cash: 'Cash on Service',
+    wallet: 'Wallet',
+    card: 'Card'
+};
+
+/** Blank / placeholder values fall back instead of printing an empty line. */
+const or = (value, fallback = 'N/A') => {
+    const text = String(value ?? '').trim();
+    return !text || text === 'N/A' ? fallback : text;
+};
+
+/** Never print "Invalid Date" — return null so the caller can omit the row. */
+const fmtDate = (value) => {
+    if (!value) return null;
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return null;
+    return d.toLocaleDateString('en-IN', { year: 'numeric', month: 'long', day: 'numeric' });
+};
+
+const fmtDateTime = (value) => {
+    if (!value) return null;
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return null;
+    return d.toLocaleString('en-IN', {
+        year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit'
+    });
+};
+
+/** 90 -> "1h 30m", 45 -> "45m". */
+const fmtDuration = (minutes) => {
+    const mins = Math.max(0, Math.round(Number(minutes) || 0));
+    if (!mins) return null;
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return h ? `${h}h${m ? ` ${m}m` : ''}` : `${m}m`;
+};
+
+/** One "<strong>Label:</strong> value" row, omitted entirely when empty. */
+const row = (label, value) =>
+    value ? `
+                <p><strong>${esc(label)}:</strong> ${esc(value)}</p>` : '';
+
 export const generateInvoiceHTML = (booking) => {
     const {
         bookingId = 'N/A',
         serviceName = 'General Service',
+        serviceDescription = '',
         category = 'N/A',
         price = 0,
+        duration = null,
         userName = 'Guest Customer',
-        userEmail = 'N/A',
-        userPhone = 'N/A',
-        address = 'N/A',
+        userEmail = '',
+        userPhone = '',
+        address = '',
+        landmark = '',
+        pincode = '',
         date = 'N/A',
         time = 'N/A',
         status = 'pending',
+        statusLabel = '',
         paymentStatus = 'PENDING',
+        paymentMethod = '',
+        transactionId = '',
+        paidAt = null,
+        completedAt = null,
+        technicianName = '',
+        technicianPhone = '',
+        customerNotes = '',
         createdAt = new Date(),
         extraServices = [],
         billing = null
     } = booking;
 
     const extras = Array.isArray(extraServices) ? extraServices : [];
+    const seller = company();
 
     // Totals always come from the shared calculator so the invoice can never
     // disagree with the stored bill / payment summary. Persisted discount and
@@ -41,17 +111,22 @@ export const generateInvoiceHTML = (booking) => {
 
     const currency = (n) => `₹${Math.round(Number(n) || 0).toLocaleString('en-IN')}`;
 
-    const formattedDate = new Date(date).toLocaleDateString('en-IN', {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric'
-    });
+    const formattedDate = fmtDate(date);
+    const issuedDate = fmtDate(createdAt) || fmtDate(new Date());
+    const paidOn = fmtDateTime(paidAt);
+    const completedOn = fmtDateTime(completedAt);
+    const serviceDuration = fmtDuration(duration);
+    const isPaid = String(paymentStatus).toLowerCase() === 'paid';
+    // Booking ids reach the PDF filename inside a JS string literal — keep it
+    // to characters that are safe both in JS source and on a filesystem.
+    const safeFileId = String(bookingId).replace(/[^A-Za-z0-9_-]/g, '') || 'booking';
 
-    const issuedDate = new Date(createdAt).toLocaleDateString('en-IN', {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric'
-    });
+    // Full postal address: street line, landmark and pincode each on their own row.
+    const addressBlock = [or(address, ''), landmark ? `Landmark: ${landmark}` : '', pincode]
+        .map((line) => String(line || '').trim())
+        .filter(Boolean)
+        .map((line) => esc(line))
+        .join('<br>') || 'N/A';
 
 
     return `
@@ -60,7 +135,7 @@ export const generateInvoiceHTML = (booking) => {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Invoice - ${bookingId}</title>
+    <title>Invoice - ${esc(bookingId)}</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
     <style>
         body {
@@ -160,6 +235,11 @@ export const generateInvoiceHTML = (booking) => {
             font-size: 18px;
             color: #2563eb;
         }
+        .notes-block {
+            clear: both;
+            margin-top: 40px;
+            padding-top: 10px;
+        }
         .footer {
             margin-top: 50px;
             text-align: center;
@@ -216,18 +296,19 @@ export const generateInvoiceHTML = (booking) => {
     <div id="invoice-card">
         <div class="header">
             <div class="company-info">
-                <h1>HOMEX</h1>
-                <p>Premium Home Services</p>
-                <p>123 Service Street, Tech City</p>
-                <p>Phone: +91 98765 43210</p>
-                <p>Email: support@homex.com</p>
+                <h1>${esc(seller.name)}</h1>
+                <p>${esc(seller.tagline)}</p>
+                <p>${esc(seller.address)}</p>
+                <p>Phone: ${esc(seller.phone)}</p>
+                <p>Email: ${esc(seller.email)}</p>${seller.gstin ? `
+                <p>GSTIN: ${esc(seller.gstin)}</p>` : ''}
             </div>
             <div class="invoice-details">
                 <h2>INVOICE</h2>
-                <p>#${bookingId}</p>
-                <p>Date Issued: ${issuedDate}</p>
-                <div class="status-stamp status-${paymentStatus.toLowerCase() === 'paid' ? 'paid' : 'pending'}">
-                    ${paymentStatus}
+                <p>#${esc(bookingId)}</p>
+                <p>Date Issued: ${esc(issuedDate)}</p>
+                <div class="status-stamp status-${isPaid ? 'paid' : 'pending'}">
+                    ${esc(String(paymentStatus).toUpperCase())}
                 </div>
             </div>
         </div>
@@ -235,17 +316,20 @@ export const generateInvoiceHTML = (booking) => {
         <div class="details-grid">
             <div class="info-block">
                 <div class="section-title">Billed To</div>
-                <p><strong>${userName}</strong></p>
-                <p>${userEmail}</p>
-                <p>${userPhone}</p>
-                <p style="white-space: pre-wrap;">${address}</p>
+                <p><strong>${esc(userName)}</strong></p>
+                <p>${esc(or(userEmail))}</p>
+                <p>${esc(or(userPhone))}</p>
+                <p>${addressBlock}</p>
             </div>
             <div class="info-block">
-                <div class="section-title">Service Details</div>
-                <p><strong>Booking ID:</strong> ${bookingId}</p>
-                <p><strong>Service Date:</strong> ${formattedDate}</p>
-                <p><strong>Time Slot:</strong> ${time}</p>
+                <div class="section-title">Service Details</div>${row('Booking ID', bookingId)}${row('Service Date', formattedDate)}${row('Time Slot', or(time, ''))}${row('Duration', serviceDuration)}${row('Booking Status', statusLabel || status)}${row('Completed On', completedOn)}
             </div>
+            <div class="info-block">
+                <div class="section-title">Payment</div>${row('Status', String(paymentStatus).toUpperCase())}${row('Method', PAYMENT_METHOD_LABELS[String(paymentMethod).toLowerCase()] || paymentMethod)}${row('Transaction ID', transactionId)}${row('Paid On', paidOn)}
+            </div>${technicianName ? `
+            <div class="info-block">
+                <div class="section-title">Service Professional</div>${row('Name', technicianName)}${row('Contact', technicianPhone)}
+            </div>` : ''}
         </div>
 
         <table>
@@ -259,10 +343,10 @@ export const generateInvoiceHTML = (booking) => {
             <tbody>
                 <tr>
                     <td>
-                        <strong>${serviceName}</strong><br>
-                        <small style="color: #666">Professional home service provided by Homax</small>
+                        <strong>${esc(serviceName)}</strong><br>
+                        <small style="color: #666">${esc(serviceDescription || `Professional home service provided by ${seller.name}`)}</small>
                     </td>
-                    <td>${category}</td>
+                    <td>${esc(or(category, 'General'))}</td>
                     <td class="amount-col">${currency(totals.baseAmount)}</td>
                 </tr>${extras.map((item) => `
                 <tr>
@@ -303,8 +387,14 @@ export const generateInvoiceHTML = (booking) => {
             </div>
         </div>
 
+${customerNotes ? `
+        <div class="notes-block">
+            <div class="section-title">Notes</div>
+            <p style="white-space: pre-wrap; margin: 0;">${esc(customerNotes)}</p>
+        </div>` : ''}
+
         <div class="footer">
-            <p>Thank you for choosing Homex for your home needs!</p>
+            <p>Thank you for choosing ${esc(seller.name)} for your home needs!</p>
             <p>This is a computer-generated invoice and does not require a signature.</p>
         </div>
     </div>
@@ -314,7 +404,7 @@ export const generateInvoiceHTML = (booking) => {
             const element = document.getElementById('invoice-card');
             const options = {
                 margin: 10,
-                filename: 'Invoice_${bookingId}.pdf',
+                filename: 'Invoice_${safeFileId}.pdf',
                 image: { type: 'jpeg', quality: 0.95 },
                 html2canvas: { scale: 1.5, useCORS: true, logging: false },
                 jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }

@@ -6,7 +6,8 @@ import {
   rescheduleBooking as updateUserBooking,
   getAvailableSlots,
   getBookingAnalytics,
-  assignEmployee // Now exists in our controller
+  assignEmployee, // Now exists in our controller
+  cancelBooking
 } from "../controllers/bookingController.js";
 
 import {
@@ -100,7 +101,10 @@ router.post("/user/create", userAuth, createBooking);
 
 router.get("/user/:id", userAuth, getBookingById);
 router.put("/user/:id", userAuth, updateUserBooking);
-// router.put("/user/:id/cancel", userAuth, cancelBooking); // cancelBooking was exported from controller
+// Customer (or admin) cancels a booking. The dashboard calls PATCH; PUT kept
+// for older clients. The controller checks ownership and the cancel window.
+router.patch("/:id/cancel", userAuth, cancelBooking);
+router.put("/:id/cancel", userAuth, cancelBooking);
 
 // ======================================
 // GENERAL / ADMIN ROUTES

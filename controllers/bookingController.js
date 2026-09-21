@@ -341,7 +341,7 @@ export const getBooking = async (req, res) => {
 // @access  Private
 export const cancelBooking = async (req, res) => {
   try {
-    const { reason } = req.body;
+    const { reason } = req.body || {};
     const booking = await Booking.findById(req.params.id);
 
     if (!booking) {
@@ -361,34 +361,44 @@ export const cancelBooking = async (req, res) => {
     }
 
     // Business logic check
-    if (!booking.canCancel()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Booking cannot be cancelled at this stage'
-      });
+    const blocked = booking.cancelBlockReason();
+    if (blocked) {
+      return res.status(400).json({ success: false, message: blocked });
     }
 
-    await booking.cancelBooking(reason, req.user.role);
+    const cancelledBy = req.user.role === 'admin' ? 'admin' : 'user';
+    const feeWasCharged = booking.serviceFee?.status === 'charged';
+    await booking.cancelBooking(typeof reason === 'string' ? reason.trim().slice(0, 300) : undefined, cancelledBy);
 
-    // Notify involved parties
-    await sendNotification(booking.userId, {
+    // Notifications are best-effort: the booking IS cancelled at this point, so
+    // a notification failure must not turn this into an error for the customer.
+    const notify = async (userId, data) => {
+      try {
+        await sendNotification(userId, data);
+      } catch (err) {
+        logger.warn({ err: err.message, bookingId: booking.bookingId }, 'Cancellation notification failed');
+      }
+    };
+
+    await notify(booking.userId, {
       title: 'Booking Cancelled',
       message: `Booking #${booking.bookingId} has been cancelled.`,
-      type: 'BOOKING_CANCELLED',
-      relatedId: booking._id
+      type: 'booking',
+      data: { bookingId: booking._id }
     });
 
     if (booking.assignedTo?.technicianId) {
-      await sendNotification(booking.assignedTo.technicianId, {
+      await notify(booking.assignedTo.technicianId, {
         title: 'Job Cancelled',
-        message: `Job #${booking.bookingId} has been cancelled by the customer.`,
-        type: 'JOB_CANCELLED',
-        relatedId: booking._id
+        message: `Job #${booking.bookingId} was cancelled by the ${cancelledBy === 'admin' ? 'admin' : 'customer'}.` +
+          (feeWasCharged ? ` Your ₹${booking.serviceFee.amount} service fee has been refunded to your balance.` : ''),
+        type: 'assignment',
+        data: { bookingId: booking._id }
       });
     }
 
     // Emit socket update
-    emitBookingUpdate(booking._id, { status: 'cancelled', cancelledBy: req.user.role });
+    emitBookingUpdate(booking._id, { status: 'CANCELLED', cancelledBy });
 
     logger.audit('booking_cancelled', req.user, `booking:${booking._id}`, { reason });
 

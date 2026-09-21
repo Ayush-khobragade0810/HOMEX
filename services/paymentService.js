@@ -14,59 +14,78 @@ class PaymentService {
             const { timeRange = 'all', status = 'all' } = filters;
             const empId = parseInt(employeeId);
 
-            // Auto-heal/sync missing payment documents for completed bookings
-            const empDoc = await Employee.findOne({ empId: empId });
+            // Auto-heal: create Payment documents for completed bookings that
+            // don't have one yet. Batched — one read for the existing payments,
+            // one insertMany, one $inc — because this runs on every dashboard
+            // load and the database is remote (~37ms per round trip).
+            const assignedToEmployee = (emp) => ({
+                $or: [
+                    { 'assignedTo.technicianId': emp._id },
+                    { assignedTo: emp._id }
+                ],
+                status: { $regex: /completed/i }
+            });
+
+            // `avatar` can hold a large inline image on older records; never needed here.
+            const empDoc = await Employee.findOne({ empId }).select('-avatar').lean();
+
             if (empDoc) {
-                const completedBookings = await Booking.find({
-                    $or: [
-                        { 'assignedTo.technicianId': empDoc._id },
-                        { assignedTo: empDoc._id }
-                    ],
-                    status: { $regex: /completed/i }
-                }).lean();
+                const [completedBookings, existingPayments] = await Promise.all([
+                    // Skip fields this never reads; assignedTo.avatar can hold a
+                    // large inline image on older records.
+                    Booking.find(assignedToEmployee(empDoc))
+                        .select('-assignedTo.avatar -history -statusTimeline')
+                        .lean(),
+                    Payment.find({ empId }).select('serviceId').lean()
+                ]);
 
-                for (const booking of completedBookings) {
-                    const existingPayment = await Payment.findOne({ serviceId: booking.bookingId });
-                    if (!existingPayment) {
-                        const lastPayment = await Payment.findOne().sort({ paymentId: -1 });
-                        const newPaymentId = lastPayment ? lastPayment.paymentId + 1 : 1001;
+                const alreadyPaid = new Set(existingPayments.map((p) => String(p.serviceId)));
+                const missing = completedBookings.filter((b) => !alreadyPaid.has(String(b.bookingId)));
 
+                if (missing.length) {
+                    const lastPayment = await Payment.findOne().sort({ paymentId: -1 }).select('paymentId').lean();
+                    let nextPaymentId = lastPayment ? lastPayment.paymentId + 1 : 1001;
+                    let earnedTotal = 0;
+
+                    const newPayments = missing.map((booking) => {
                         const collected = booking.payment?.amount || booking.billing?.grandTotal || booking.serviceDetails?.price || 0;
                         const commissionRate = 30;
                         const commission = Math.round(collected * (commissionRate / 100) * 100) / 100;
                         const baseRate = Math.round((collected - commission) * 100) / 100;
                         const durationHours = ((booking.serviceDetails?.duration || 60) / 60) || 1;
+                        earnedTotal += baseRate;
 
-                        const paymentData = {
-                            paymentId: newPaymentId,
+                        return {
+                            paymentId: nextPaymentId++,
                             empId: empDoc.empId,
                             employee: empDoc._id,
                             serviceId: booking.bookingId,
                             customer: {
-                                    name: booking.contactIdInfo?.fullName || booking.contactInfo?.fullName || booking.userId?.name || 'Customer',
-                                    email: booking.contactIdInfo?.email || booking.contactInfo?.email || booking.userId?.email || '',
-                                    phone: booking.contactIdInfo?.phoneNumber || booking.contactInfo?.phoneNumber || booking.userId?.phone || '',
-                                    address: booking.location?.completeAddress || booking.location?.address || ''
+                                name: booking.contactIdInfo?.fullName || booking.contactInfo?.fullName || booking.userId?.name || 'Customer',
+                                email: booking.contactIdInfo?.email || booking.contactInfo?.email || booking.userId?.email || '',
+                                phone: booking.contactIdInfo?.phoneNumber || booking.contactInfo?.phoneNumber || booking.userId?.phone || '',
+                                address: booking.location?.completeAddress || booking.location?.address || ''
                             },
                             serviceType: booking.serviceDetails?.title || 'Service',
                             amount: collected,
-                            commission: commission,
-                            commissionRate: commissionRate,
-                            baseRate: baseRate,
+                            commission,
+                            commissionRate,
+                            baseRate,
                             hours: durationHours,
                             date: booking.completedAt || booking.updatedAt || new Date(),
                             status: 'completed',
                             paymentMethod: booking.payment?.method || 'cash',
-                            transactionId: booking.payment?.transactionId || `TXN-${Date.now()}`
+                            transactionId: booking.payment?.transactionId || `TXN-${Date.now()}-${nextPaymentId}`
                         };
+                    });
 
-                        await Payment.create(paymentData);
-
-                        // Sync employee wallet Balance/earnings
-                        empDoc.walletBalance = (empDoc.walletBalance || 0) + baseRate;
-                        empDoc.earnings = (empDoc.earnings || 0) + baseRate;
-                        await empDoc.save();
-                    }
+                    await Payment.insertMany(newPayments, { ordered: false });
+                    // $inc, not save(): saving the document would rewrite every
+                    // field (including a large inline avatar) on each heal.
+                    await Employee.updateOne(
+                        { _id: empDoc._id },
+                        { $inc: { walletBalance: earnedTotal, earnings: earnedTotal } }
+                    );
                 }
             }
 
@@ -98,14 +117,14 @@ class PaymentService {
                 query.status = status;
             }
 
-            // Get payments
-            const payments = await Payment.find(query)
+            // Everything below is independent, so issue it in parallel: on a
+            // remote database the round trips dominate the response time.
+            const paymentsPromise = Payment.find(query)
                 .sort({ date: -1 })
                 .limit(100)
                 .lean();
 
-            // Get stats using aggregation
-            const statsAggregation = await Payment.aggregate([
+            const statsPromise = Payment.aggregate([
                 { $match: { empId: empId } },
                 {
                     $facet: {
@@ -146,9 +165,59 @@ class PaymentService {
                 },
             ]);
 
-            // Calculate weekly growth (simplified)
-            const lastWeekEarnings = await this.getPeriodEarnings(empId, subDays(now, 14), subDays(now, 7));
-            const thisWeekEarnings = await this.getPeriodEarnings(empId, subDays(now, 7), now);
+            const paymentMethodsPromise = Payment.aggregate([
+                { $match: { empId: empId, status: 'completed' } },
+                {
+                    $group: {
+                        _id: '$paymentMethod',
+                        count: { $sum: 1 },
+                        totalAmount: { $sum: '$amount' },
+                    },
+                },
+            ]);
+
+            const upcomingBookingsPromise = empDoc
+                ? Booking.find({
+                    $or: [
+                        { 'assignedTo.technicianId': empDoc._id },
+                        { assignedTo: empDoc._id }
+                    ],
+                    status: { $in: ['ASSIGNED', 'assigned', 'ACCEPTED', 'CONFIRMED', 'IN_PROGRESS', 'NAVIGATING', 'STARTED', 'in_progress', 'scheduled', 'confirmed'] }
+                })
+                    .select('-assignedTo.avatar -history -statusTimeline')
+                    .populate('userId', 'name email phone')
+                    .sort({ 'schedule.preferredDate': 1 })
+                    .limit(5)
+                    .lean()
+                : Promise.resolve([]);
+
+            const dbUpcomingPromise = UpcomingPayment.find({
+                empId: empId,
+                status: { $ne: 'completed' },
+            })
+                .sort({ scheduledDate: 1 })
+                .limit(5)
+                .lean();
+
+            const [
+                payments,
+                statsAggregation,
+                lastWeekEarnings,
+                thisWeekEarnings,
+                paymentMethodsAgg,
+                bookings,
+                dbUpcoming,
+                earningsTrend
+            ] = await Promise.all([
+                paymentsPromise,
+                statsPromise,
+                this.getPeriodEarnings(empId, subDays(now, 14), subDays(now, 7)),
+                this.getPeriodEarnings(empId, subDays(now, 7), now),
+                paymentMethodsPromise,
+                upcomingBookingsPromise,
+                dbUpcomingPromise,
+                this.getEarningsTrend(empId, 7)
+            ]);
 
             const stats = {
                 totalEarnings: 0,
@@ -184,18 +253,6 @@ class PaymentService {
                 stats.weeklyGrowth = Math.round(((thisWeekEarnings - lastWeekEarnings) / lastWeekEarnings) * 100);
             }
 
-            // Get payment methods distribution
-            const paymentMethodsAgg = await Payment.aggregate([
-                { $match: { empId: empId, status: 'completed' } },
-                {
-                    $group: {
-                        _id: '$paymentMethod',
-                        count: { $sum: 1 },
-                        totalAmount: { $sum: '$amount' },
-                    },
-                },
-            ]);
-
             const paymentMethods = {
                 credit_card: 0,
                 cash: 0,
@@ -210,24 +267,7 @@ class PaymentService {
                 }
             });
 
-            // Query Bookings to get actual upcoming/pending payments for the employee
-            const employeeUser = await Employee.findOne({ empId });
-            let mappedUpcoming = [];
-
-            if (employeeUser) {
-                const bookings = await Booking.find({
-                    $or: [
-                        { 'assignedTo.technicianId': employeeUser._id },
-                        { assignedTo: employeeUser._id }
-                    ],
-                    status: { $in: ['ASSIGNED', 'assigned', 'ACCEPTED', 'CONFIRMED', 'IN_PROGRESS', 'NAVIGATING', 'STARTED', 'in_progress', 'scheduled', 'confirmed'] }
-                })
-                .populate('userId', 'name email phone')
-                .sort({ 'schedule.preferredDate': 1 })
-                .limit(5)
-                .lean();
-
-                mappedUpcoming = bookings.map(b => {
+            const mappedUpcoming = bookings.map(b => {
                     const durationHours = (b.serviceDetails?.duration || 60) / 60;
                     const estimatedAmount = b.billing?.grandTotal || b.serviceDetails?.price || 0;
                     return {
@@ -245,28 +285,14 @@ class PaymentService {
                         serviceType: b.serviceDetails?.title || 'Service',
                         hours: durationHours,
                         hourlyRate: durationHours > 0 ? estimatedAmount / durationHours : estimatedAmount,
-                        status: 'scheduled'
-                    };
-                });
-            }
-
-            // Fallback/merge with UpcomingPayment collection if any exist
-            const dbUpcoming = await UpcomingPayment.find({
-                empId: empId,
-                status: { $ne: 'completed' },
-            })
-                .sort({ scheduledDate: 1 })
-                .limit(5)
-                .lean();
+                    status: 'scheduled'
+                };
+            });
 
             const upcomingPayments = mappedUpcoming.length > 0 ? mappedUpcoming : dbUpcoming;
 
-            // Get earnings trend (last 7 days)
-            const earningsTrend = await this.getEarningsTrend(empId, 7);
-
-            // Fetch Employee for wallet balance
-            const employee = employeeUser || await Employee.findOne({ empId });
-            const walletBalance = employee?.walletBalance || 0;
+            // Wallet balance comes from the employee document already read above.
+            const walletBalance = empDoc?.walletBalance || 0;
 
             // Adjust stats to include wallet info
             stats.walletBalance = walletBalance;

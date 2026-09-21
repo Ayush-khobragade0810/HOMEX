@@ -44,6 +44,7 @@ import testRoutes from './routes/test.js';
 import notificationRoutes from './routes/notificationRoutes.js';
 import scheduleRoutes from './routes/scheduleRoutes.js';
 import paymentRoutes from './routes/paymentRoutes.js';
+import subscriptionRoutes from './routes/subscriptionRoutes.js';
 import serviceDetailRoutes from './routes/serviceDetailRoutes.js';
 
 // Constants and App Setup
@@ -74,7 +75,10 @@ const io = new Server(httpServer, {
 
 // Connect to MongoDB
 mongoose.connect(process.env.MONGO_URI, {
-  family: 4
+  family: 4,
+  // Indexes are created by the migration/startup once; rebuilding them on every
+  // boot costs ~30 round trips, which is felt on a cold start.
+  autoIndex: process.env.NODE_ENV !== 'production'
 })
   .then(async () => {
     logger.info('MongoDB Connected');
@@ -216,6 +220,7 @@ app.use('/api/service-details', serviceDetailRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/schedule', scheduleRoutes);
 app.use('/api/payments', paymentRoutes);
+app.use('/api/subscription', subscriptionRoutes);
 app.use('/api/countries', countryRoutes);
 app.use('/api/states', stateRoutes);
 app.use('/api/cities', cityRoutes);
