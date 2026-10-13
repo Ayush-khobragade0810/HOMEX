@@ -11,6 +11,7 @@ import SubscriptionLedger from '../models/SubscriptionLedger.js';
 import { creditBalance } from '../services/serviceFeeService.js';
 import { sendNotification } from '../utils/helpers.js';
 import logger from '../utils/logger.js';
+import { sendError } from '../utils/ApiError.js';
 import { notifyAdmins, ADMIN_EVENTS } from '../utils/adminEvents.js';
 
 /** The logged-in employee, or null when the caller is not an employee. */
@@ -56,12 +57,12 @@ export const getMySubscription = async (req, res) => {
     try {
         const employee = await currentEmployee(req);
         if (!employee) {
-            return res.status(403).json({ success: false, message: 'Only employees have subscriptions' });
+            return sendError(res, 403, 'Only employees have subscriptions');
         }
         res.json({ success: true, subscription: describeSubscription(employee.subscription) });
     } catch (error) {
         logger.error('Get subscription error', error);
-        res.status(500).json({ success: false, message: 'Could not load subscription' });
+        sendError(res, 500, 'Could not load subscription');
     }
 };
 
@@ -72,24 +73,18 @@ export const submitPaymentRequest = async (req, res) => {
     try {
         const employee = await currentEmployee(req);
         if (!employee) {
-            return res.status(403).json({ success: false, message: 'Only employees have subscriptions' });
+            return sendError(res, 403, 'Only employees have subscriptions');
         }
 
         const { errors, value } = validatePaymentRequest(req.body);
         if (Object.keys(errors).length) {
-            return res.status(400).json({
-                success: false,
-                message: Object.values(errors)[0],
-                errors
-            });
+            // `errors` stays keyed by field: the subscription page highlights each input.
+            return sendError(res, 400, Object.values(errors)[0], { code: 'VALIDATION_ERROR', errors });
         }
         const { transactionId, paymentMethod, paidOn, note } = value;
 
         if (employee.subscription?.pendingRequest?.submittedAt) {
-            return res.status(409).json({
-                success: false,
-                message: 'You already have a payment awaiting approval'
-            });
+            return sendError(res, 409, 'You already have a payment awaiting approval');
         }
 
         // One transaction reference can only ever pay for one period.
@@ -101,9 +96,7 @@ export const submitPaymentRequest = async (req, res) => {
             ]
         });
         if (reused) {
-            return res.status(409).json({
-                success: false,
-                message: 'This transaction reference has already been used',
+            return sendError(res, 409, 'This transaction reference has already been used', {
                 errors: { transactionId: 'This transaction reference has already been used' }
             });
         }
@@ -143,7 +136,7 @@ export const submitPaymentRequest = async (req, res) => {
         });
     } catch (error) {
         logger.error('Submit subscription payment error', error);
-        res.status(500).json({ success: false, message: 'Could not submit payment' });
+        sendError(res, 500, 'Could not submit payment');
     }
 };
 
@@ -205,7 +198,7 @@ export const listSubscriptions = async (req, res) => {
         res.json({ success: true, data: rows, counts, summary });
     } catch (error) {
         logger.error('List subscriptions error', error);
-        res.status(500).json({ success: false, message: 'Could not load subscriptions' });
+        sendError(res, 500, 'Could not load subscriptions');
     }
 };
 
@@ -216,15 +209,15 @@ export const approvePayment = async (req, res) => {
     try {
         const { employeeId } = req.params;
         if (!mongoose.Types.ObjectId.isValid(employeeId)) {
-            return res.status(400).json({ success: false, message: 'Invalid employee id' });
+            return sendError(res, 400, 'Invalid employee id');
         }
 
         const existing = await Employee.findById(employeeId).select('subscription.pendingRequest').lean();
-        if (!existing) return res.status(404).json({ success: false, message: 'Employee not found' });
+        if (!existing) return sendError(res, 404, 'Employee not found');
 
         const request = existing.subscription?.pendingRequest;
         if (!request?.submittedAt) {
-            return res.status(409).json({ success: false, message: 'No payment is awaiting approval for this employee' });
+            return sendError(res, 409, 'No payment is awaiting approval for this employee');
         }
 
         const adminId = req.user?._id || req.user?.id;
@@ -250,7 +243,7 @@ export const approvePayment = async (req, res) => {
             { new: true, projection: { avatar: 0 } }
         );
         if (!consumed) {
-            return res.status(409).json({ success: false, message: 'This payment was already processed' });
+            return sendError(res, 409, 'This payment was already processed');
         }
 
         const balance = await creditBalance(employeeId, amount, {
@@ -277,7 +270,7 @@ export const approvePayment = async (req, res) => {
         res.json({ success: true, message: 'Payment approved', subscription: describeSubscription(consumed.subscription) });
     } catch (error) {
         logger.error('Approve subscription error', error);
-        res.status(500).json({ success: false, message: 'Could not approve payment' });
+        sendError(res, 500, 'Could not approve payment');
     }
 };
 
@@ -290,18 +283,18 @@ export const rejectPayment = async (req, res) => {
         const reason = String(req.body.reason || '').trim().slice(0, 300);
 
         if (!mongoose.Types.ObjectId.isValid(employeeId)) {
-            return res.status(400).json({ success: false, message: 'Invalid employee id' });
+            return sendError(res, 400, 'Invalid employee id');
         }
         if (!reason) {
-            return res.status(400).json({ success: false, message: 'Give the employee a reason so they can fix it' });
+            return sendError(res, 400, 'Give the employee a reason so they can fix it');
         }
 
         const employee = await Employee.findById(employeeId).select('-avatar');
-        if (!employee) return res.status(404).json({ success: false, message: 'Employee not found' });
+        if (!employee) return sendError(res, 404, 'Employee not found');
 
         const request = employee.subscription?.pendingRequest;
         if (!request?.submittedAt) {
-            return res.status(409).json({ success: false, message: 'No payment is awaiting approval for this employee' });
+            return sendError(res, 409, 'No payment is awaiting approval for this employee');
         }
 
         employee.subscription.lastRejection = { transactionId: request.transactionId, reason, at: new Date() };
@@ -325,7 +318,7 @@ export const rejectPayment = async (req, res) => {
         res.json({ success: true, message: 'Payment rejected', subscription: describeSubscription(employee.subscription) });
     } catch (error) {
         logger.error('Reject subscription error', error);
-        res.status(500).json({ success: false, message: 'Could not reject payment' });
+        sendError(res, 500, 'Could not reject payment');
     }
 };
 
@@ -351,7 +344,7 @@ export const getMyLedger = async (req, res) => {
     try {
         const employee = await currentEmployee(req);
         if (!employee) {
-            return res.status(403).json({ success: false, message: 'Only employees have subscriptions' });
+            return sendError(res, 403, 'Only employees have subscriptions');
         }
         res.json({
             success: true,
@@ -360,7 +353,7 @@ export const getMyLedger = async (req, res) => {
         });
     } catch (error) {
         logger.error('Get ledger error', error);
-        res.status(500).json({ success: false, message: 'Could not load balance history' });
+        sendError(res, 500, 'Could not load balance history');
     }
 };
 
@@ -371,10 +364,10 @@ export const getEmployeeLedger = async (req, res) => {
     try {
         const { employeeId } = req.params;
         if (!mongoose.Types.ObjectId.isValid(employeeId)) {
-            return res.status(400).json({ success: false, message: 'Invalid employee id' });
+            return sendError(res, 400, 'Invalid employee id');
         }
         const employee = await Employee.findById(employeeId).select('subscription').lean();
-        if (!employee) return res.status(404).json({ success: false, message: 'Employee not found' });
+        if (!employee) return sendError(res, 404, 'Employee not found');
 
         res.json({
             success: true,
@@ -383,7 +376,7 @@ export const getEmployeeLedger = async (req, res) => {
         });
     } catch (error) {
         logger.error('Get employee ledger error', error);
-        res.status(500).json({ success: false, message: 'Could not load balance history' });
+        sendError(res, 500, 'Could not load balance history');
     }
 };
 
@@ -396,7 +389,7 @@ export const getMyOpenJobs = async (req, res) => {
     try {
         const employee = await currentEmployee(req);
         if (!employee) {
-            return res.status(403).json({ success: false, message: 'Only employees have subscriptions' });
+            return sendError(res, 403, 'Only employees have subscriptions');
         }
 
         const { default: Booking } = await import('../models/Booking.js');
@@ -430,6 +423,6 @@ export const getMyOpenJobs = async (req, res) => {
         res.json({ success: true, jobs });
     } catch (error) {
         logger.error('Get open jobs error', error);
-        res.status(500).json({ success: false, message: 'Could not load your open services' });
+        sendError(res, 500, 'Could not load your open services');
     }
 };

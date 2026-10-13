@@ -10,12 +10,15 @@ import { refundOnReassign } from '../services/serviceFeeService.js';
 import { availabilityBlockReason } from '../utils/availability.js';
 import { copyableAvatar } from '../utils/avatarStorage.js';
 import { computeBilling } from '../utils/billing.js';
+import { ApiError } from '../utils/ApiError.js';
 
 // ======================================
 // HELPERS
 // ======================================
 
 const validateObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
+
+const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // ======================================
 // BOOKING STATUS
@@ -71,6 +74,17 @@ export const normalizeStatus = (status) => {
 // a booking must not throw away the assignment marker the employee dashboards
 // filter on, so the two count as the same step here.
 const isSameStep = (a, b) => a === b || (['ACCEPTED', 'ASSIGNED'].includes(a) && ['ACCEPTED', 'ASSIGNED'].includes(b));
+
+// Completed and cancelled bookings are closed: the only way out is "Reopen"
+// (back to PENDING), which clears the old milestones. Jumping straight from a
+// closed booking to e.g. In Progress would leave a contradictory timeline.
+const TERMINAL_STATUSES = ['COMPLETED', 'CANCELLED'];
+const transitionBlockReason = (from, to) => {
+    if (TERMINAL_STATUSES.includes(from) && to !== 'PENDING') {
+        return `This booking is already ${STATUS_LABELS[from].toLowerCase()}. Reopen it (set it back to Pending) before changing it to ${STATUS_LABELS[to]}.`;
+    }
+    return null;
+};
 
 // Keeps the milestone timestamps in sync with the status. Moving a booking
 // backwards (e.g. "Reopen") has to clear the milestones it left behind,
@@ -313,7 +327,7 @@ export const formatBookingResponse = (booking) => {
  * @route   GET /api/admin/bookings
  * @access  Private/Admin
  */
-export const getAllBookings = async (req, res) => {
+export const getAllBookings = async (req, res, next) => {
     try {
         const {
             status,
@@ -322,8 +336,11 @@ export const getAllBookings = async (req, res) => {
             search = ''
         } = req.query;
 
-        const limitNum = Math.min(parseInt(limit), 200);
-        const skipNum = (parseInt(page) - 1) * limitNum;
+        // Query is validated by the route (positive integers), the fallbacks
+        // only guard direct callers.
+        const limitNum = Math.min(parseInt(limit) || 100, 200);
+        const pageNum = Math.max(parseInt(page) || 1, 1);
+        const skipNum = (pageNum - 1) * limitNum;
 
         // 1. Build Match Stage
         const matchStage = {};
@@ -355,11 +372,13 @@ export const getAllBookings = async (req, res) => {
         }
 
         if (search) {
+            // Literal text search: "(" or "+" in the box must not become regex syntax (500).
+            const pattern = escapeRegex(String(search).trim());
             matchStage.$or = matchStage.$or || [];
             matchStage.$or.push(
-                { bookingId: { $regex: search, $options: 'i' } },
-                { "serviceDetails.title": { $regex: search, $options: 'i' } },
-                { "userName": { $regex: search, $options: 'i' } }
+                { bookingId: { $regex: pattern, $options: 'i' } },
+                { "serviceDetails.title": { $regex: pattern, $options: 'i' } },
+                { "userName": { $regex: pattern, $options: 'i' } }
             );
         }
 
@@ -478,18 +497,14 @@ export const getAllBookings = async (req, res) => {
             success: true,
             data: formattedBookings,
             total: totalBookings,
-            page: parseInt(page),
+            page: pageNum,
             limit: limitNum,
             totalPages: Math.ceil(totalBookings / limitNum)
         });
 
     } catch (error) {
-        console.error("Admin bookings aggregation error:", error);
-        res.status(500).json({ 
-            success: false, 
-            error: "Failed to load bookings", 
-            message: error.message 
-        });
+        // Global handler logs it and responds 500 without leaking internals.
+        next(error);
     }
 };
 
@@ -499,33 +514,28 @@ export const getAllBookings = async (req, res) => {
  * @access  Private/Admin
  */
 export const getBookingById = async (req, res) => {
-    try {
-        const bookingId = sanitizeInput(req.params.id);
+    const bookingId = sanitizeInput(req.params.id);
 
-        if (!validateObjectId(bookingId)) {
-            return res.status(400).json({ success: false, error: 'Invalid booking ID format' });
-        }
-
-        const booking = await Booking.findById(bookingId)
-            .populate('userId', 'name email phone address avatar')
-            .populate('serviceId', 'name title category price description duration')
-            .populate('location.area')
-            .lean();
-
-        if (!booking) {
-            return res.status(404).json({ success: false, message: 'Booking not found' });
-        }
-
-        const formattedBooking = formatBookingResponse(booking);
-        if (formattedBooking.status === 'in_progress') {
-            formattedBooking.status = 'in progress';
-        }
-
-        res.json({ success: true, booking: formattedBooking });
-    } catch (error) {
-        console.error('Booking details error:', error);
-        res.status(500).json({ success: false, message: 'Server error', error: error.message });
+    if (!validateObjectId(bookingId)) {
+        throw ApiError.badRequest('Invalid booking ID format', { code: 'INVALID_ID' });
     }
+
+    const booking = await Booking.findById(bookingId)
+        .populate('userId', 'name email phone address avatar')
+        .populate('serviceId', 'name title category price description duration')
+        .populate('location.area')
+        .lean();
+
+    if (!booking) {
+        throw ApiError.notFound('Booking not found');
+    }
+
+    const formattedBooking = formatBookingResponse(booking);
+    if (formattedBooking.status === 'in_progress') {
+        formattedBooking.status = 'in progress';
+    }
+
+    res.json({ success: true, booking: formattedBooking });
 };
 
 /**
@@ -534,19 +544,16 @@ export const getBookingById = async (req, res) => {
  * @access  Private (Admin)
  */
 export const getUserBookings = async (req, res) => {
-    try {
-        const bookings = await Booking.find({ userId: req.params.userId })
-            .populate("assignedTo.technicianId", "name email")
-            .populate("serviceId", "name category")
-            .populate("location.area")
-            .sort({ createdAt: -1 })
-            .lean();
+    // A malformed userId becomes a CastError -> 400 in the global handler.
+    const bookings = await Booking.find({ userId: req.params.userId })
+        .populate("assignedTo.technicianId", "name email")
+        .populate("serviceId", "name category")
+        .populate("location.area")
+        .sort({ createdAt: -1 })
+        .lean();
 
-        const formattedBookings = bookings.map(b => formatBookingResponse(b));
-        res.json({ success: true, bookings: formattedBookings });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
+    const formattedBookings = bookings.map(b => formatBookingResponse(b));
+    res.json({ success: true, bookings: formattedBookings });
 };
 
 /**
@@ -554,27 +561,30 @@ export const getUserBookings = async (req, res) => {
  * @route   PUT/PATCH /api/admin/bookings/:id/status
  * @access  Private/Admin
  */
-export const updateBookingStatus = async (req, res) => {
+export const updateBookingStatus = async (req, res, next) => {
     try {
         const { id } = req.params;
         const { status, notes, cancellationReason, updatedBy = 'admin' } = req.body;
 
         if (!id || !status) {
-            return res.status(400).json({ success: false, error: 'Booking ID and status are required' });
+            throw ApiError.badRequest('Booking ID and status are required');
         }
 
         if (!validateObjectId(id)) {
-            return res.status(400).json({ success: false, error: 'Invalid booking ID' });
+            throw ApiError.badRequest('Invalid booking ID format', { code: 'INVALID_ID' });
         }
 
         const dbStatus = normalizeStatus(status);
         if (!dbStatus) {
-            return res.status(400).json({ success: false, error: `Invalid status: ${status}` });
+            throw ApiError.validation(
+                [{ field: 'status', message: `Invalid status "${status}". Valid statuses: ${BOOKING_STATUSES.join(', ')}` }],
+                `Invalid status "${status}". Valid statuses: ${BOOKING_STATUSES.join(', ')}`
+            );
         }
 
         const booking = await Booking.findById(id);
         if (!booking) {
-            return res.status(404).json({ success: false, error: 'Booking not found' });
+            throw ApiError.notFound('Booking not found');
         }
 
         const currentStatus = normalizeStatus(booking.status) || 'PENDING';
@@ -594,6 +604,11 @@ export const updateBookingStatus = async (req, res) => {
                 unchanged: true,
                 booking: formatBookingResponse(unchanged)
             });
+        }
+
+        const blocked = transitionBlockReason(currentStatus, dbStatus);
+        if (blocked) {
+            throw ApiError.conflict(blocked, { code: 'INVALID_STATUS_TRANSITION' });
         }
 
         booking.status = dbStatus;
@@ -669,12 +684,8 @@ export const updateBookingStatus = async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Update Status Error:', error);
-        const isValidation = error.name === 'ValidationError';
-        res.status(isValidation ? 400 : 500).json({
-            success: false,
-            error: isValidation ? error.message : 'Internal Server Error'
-        });
+        // ApiError / Mongoose ValidationError -> 4xx, anything else -> logged 500.
+        next(error);
     }
 };
 
@@ -683,12 +694,12 @@ export const updateBookingStatus = async (req, res) => {
  * @route   PUT /api/admin/bookings/:id
  * @access  Private/Admin
  */
-export const updateBooking = async (req, res) => {
+export const updateBooking = async (req, res, next) => {
     try {
         const bookingId = sanitizeInput(req.params.id);
 
         if (!validateObjectId(bookingId)) {
-            return res.status(400).json({ success: false, error: "Invalid booking ID" });
+            throw ApiError.badRequest('Invalid booking ID format', { code: 'INVALID_ID' });
         }
 
         // Whitelist: status has its own endpoint (it carries timeline + notification
@@ -700,7 +711,7 @@ export const updateBooking = async (req, res) => {
         }
 
         if (Object.keys(updateData).length === 1) {
-            return res.status(400).json({ success: false, error: "No editable fields provided" });
+            throw ApiError.badRequest(`No editable fields provided. Editable fields: ${EDITABLE.join(', ')}`);
         }
 
         const updated = await Booking.findByIdAndUpdate(bookingId, updateData, { new: true, runValidators: true })
@@ -709,12 +720,12 @@ export const updateBooking = async (req, res) => {
             .populate("assignedTo.technicianId", "name email phone")
             .lean();
 
-        if (!updated) return res.status(404).json({ success: false, error: "Booking not found" });
+        if (!updated) throw ApiError.notFound('Booking not found');
 
         cache.clear();
         res.json({ success: true, message: "Booking updated", booking: formatBookingResponse(updated) });
     } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
+        next(error);
     }
 };
 
@@ -723,21 +734,21 @@ export const updateBooking = async (req, res) => {
  * @route   DELETE /api/admin/bookings/:id
  * @access  Private/Admin
  */
-export const deleteBooking = async (req, res) => {
+export const deleteBooking = async (req, res, next) => {
     try {
         const bookingId = sanitizeInput(req.params.id);
         const booking = await Booking.findById(bookingId);
-        if (!booking) return res.status(404).json({ success: false, error: "Booking not found" });
+        if (!booking) throw ApiError.notFound('Booking not found');
 
         if (!['pending', 'cancelled', 'rejected', 'PENDING', 'CANCELLED'].includes(booking.status)) {
-            return res.status(400).json({ success: false, error: "Cannot delete active booking" });
+            throw ApiError.conflict('Cannot delete an active booking. Only pending or cancelled bookings can be deleted.');
         }
 
         await Booking.findByIdAndDelete(bookingId);
         cache.clear();
         res.json({ success: true, message: "Booking deleted" });
     } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
+        next(error);
     }
 };
 
@@ -746,16 +757,25 @@ export const deleteBooking = async (req, res) => {
  * @route   POST /api/admin/bookings/:id/assign
  * @access  Private/Admin
  */
-export const assignBooking = async (req, res) => {
+export const assignBooking = async (req, res, next) => {
     try {
         const { id: bookingId } = req.params;
         const { employeeId } = req.body;
         const adminId = req.user?.id || req.user?._id;
 
-        if (!employeeId) return res.status(400).json({ success: false, message: 'Employee ID is required' });
+        if (!employeeId) throw ApiError.badRequest('Employee ID is required');
+        if (!validateObjectId(employeeId)) throw ApiError.badRequest('Invalid employee ID format', { code: 'INVALID_ID' });
 
         const booking = await Booking.findById(bookingId);
-        if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
+        if (!booking) throw ApiError.notFound('Booking not found');
+
+        const currentStatus = normalizeStatus(booking.status);
+        if (TERMINAL_STATUSES.includes(currentStatus)) {
+            throw ApiError.conflict(
+                `Cannot assign an employee to a ${STATUS_LABELS[currentStatus].toLowerCase()} booking. Reopen it first.`,
+                { code: 'INVALID_STATUS_TRANSITION' }
+            );
+        }
 
         let employee = await User.findById(employeeId);
         if (!employee) {
@@ -763,10 +783,12 @@ export const assignBooking = async (req, res) => {
             employee = await AdminEmployee.findById(employeeId);
         }
 
-        if (!employee) return res.status(404).json({ success: false, message: 'Employee not found' });
+        if (!employee) throw ApiError.notFound('Employee not found');
 
+        // Status kept at 400 (not 402): the frontend's 402 + SUBSCRIPTION_REQUIRED
+        // handling is meant for the employee themself, not the admin assigning.
         if (!(await canReceiveJobs(employee))) {
-            return res.status(400).json({ success: false, code: 'SUBSCRIPTION_REQUIRED', message: SUBSCRIPTION_ASSIGN_ERROR });
+            return res.status(400).json({ success: false, code: 'SUBSCRIPTION_REQUIRED', message: SUBSCRIPTION_ASSIGN_ERROR, error: SUBSCRIPTION_ASSIGN_ERROR });
         }
 
         // Respect the employee's own availability (switch + working days/hours).
@@ -775,7 +797,8 @@ export const assignBooking = async (req, res) => {
             typeof booking.slotStartsAt === 'function' ? booking.slotStartsAt() : null
         );
         if (unavailable) {
-            return res.status(400).json({ success: false, code: 'EMPLOYEE_UNAVAILABLE', message: unavailable });
+            // 409: the request is fine, the employee's schedule conflicts with the slot.
+            return res.status(409).json({ success: false, code: 'EMPLOYEE_UNAVAILABLE', message: unavailable, error: unavailable });
         }
 
         // Taking the job away from an employee who already paid its fee refunds them.
@@ -867,8 +890,7 @@ export const assignBooking = async (req, res) => {
         res.json({ success: true, message: 'Employee assigned successfully', booking: formatBookingResponse(updatedBooking) });
 
     } catch (error) {
-        console.error('Assignment error:', error);
-        res.status(500).json({ success: false, error: 'Internal server error' });
+        next(error);
     }
 };
 
@@ -916,12 +938,13 @@ const buildInvoiceData = (booking) => {
  * @route   GET /api/bookings/:id/invoice
  * @access  Private (booking owner, or admin)
  */
-export const generateUserInvoice = async (req, res) => {
+export const generateUserInvoice = async (req, res, next) => {
     try {
         const { id } = req.params;
-        const query = validateObjectId(id) ? { _id: id } : { bookingId: id };
+        // Accepts the Mongo _id or the human bookingId (e.g. "BK-...").
+        const query = validateObjectId(id) ? { _id: id } : { bookingId: String(id) };
         const booking = await Booking.findOne(query).populate('userId').populate('serviceId').lean();
-        if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
+        if (!booking) throw ApiError.notFound('Booking not found');
 
         // Ownership check — a customer may only download their own invoice.
         const ownerId = String(booking.userId?._id || booking.userId || '');
@@ -929,28 +952,25 @@ export const generateUserInvoice = async (req, res) => {
         const isAdmin = String(req.user?.role || '').toLowerCase() === 'admin';
 
         if (!isAdmin && (!ownerId || ownerId !== requesterId)) {
-            return res.status(403).json({
-                success: false,
-                message: 'You can only download invoices for your own bookings.'
-            });
+            throw ApiError.forbidden('You can only download invoices for your own bookings.');
         }
 
         res.setHeader('Content-Type', 'text/html');
         res.send(generateInvoiceHTML(buildInvoiceData(booking)));
     } catch (error) {
-        res.status(500).json({ success: false, message: 'Failed to generate invoice', error: error.message });
+        next(error);
     }
 };
 
-export const generateInvoice = async (req, res) => {
+export const generateInvoice = async (req, res, next) => {
     try {
         const { id } = req.params;
         const booking = await Booking.findById(id).populate('userId').populate('serviceId').lean();
-        if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
+        if (!booking) throw ApiError.notFound('Booking not found');
 
         res.setHeader('Content-Type', 'text/html');
         res.send(generateInvoiceHTML(buildInvoiceData(booking)));
     } catch (error) {
-        res.status(500).json({ success: false, message: 'Failed to generate invoice', error: error.message });
+        next(error);
     }
 };

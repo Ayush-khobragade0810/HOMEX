@@ -1,13 +1,23 @@
 import Service from "../models/Service.js";
 import Activity from "../models/Activity.js";
 import Employee from "../models/adminEmployee.js";
+import { ApiError } from "../utils/ApiError.js";
+
+const isAdminRequest = (req) => String(req.user?.role || '').toLowerCase() === 'admin';
+const isOwnEmpId = (req, empId) =>
+    req.user?.empId !== undefined && req.user?.empId !== null && Number(req.user.empId) === Number(empId);
+const notYours = () => ApiError.forbidden('This service is not assigned to you.', { code: 'NOT_ASSIGNED' });
 
 // Get services for employee
-export const getEmployeeServices = async (req, res) => {
+export const getEmployeeServices = async (req, res, next) => {
     try {
         const { empId } = req.params;
         const { status, limit = 50 } = req.query;
-        
+
+        if (!isAdminRequest(req) && !isOwnEmpId(req, empId)) {
+            throw ApiError.forbidden('You can only view your own services.');
+        }
+
         let query = { empId: parseInt(empId) };
 
         if (status) {
@@ -21,12 +31,12 @@ export const getEmployeeServices = async (req, res) => {
 
         res.json(services);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 };
 
 // Update service status
-export const updateServiceStatus = async (req, res) => {
+export const updateServiceStatus = async (req, res, next) => {
     try {
         const { id } = req.params;
         const { status, actualHours, rating, feedback } = req.body;
@@ -39,6 +49,13 @@ export const updateServiceStatus = async (req, res) => {
             if (feedback) updateData.feedback = feedback;
         }
 
+        const existing = await Service.findOne({ serviceId: parseInt(id) }).select('empId status').lean();
+        if (!existing) throw ApiError.notFound("Service not found");
+        if (!isAdminRequest(req) && !isOwnEmpId(req, existing.empId)) throw notYours();
+        if (['completed', 'cancelled'].includes(existing.status)) {
+            throw ApiError.conflict(`Cannot change the status of a service that is already ${existing.status}.`, { code: 'INVALID_STATUS_TRANSITION' });
+        }
+
         const service = await Service.findOneAndUpdate(
             { serviceId: parseInt(id) },
             updateData,
@@ -46,7 +63,7 @@ export const updateServiceStatus = async (req, res) => {
         );
 
         if (!service) {
-            return res.status(404).json({ message: "Service not found" });
+            throw ApiError.notFound("Service not found");
         }
 
         // Log activity based on status change
@@ -55,7 +72,7 @@ export const updateServiceStatus = async (req, res) => {
 
         switch (status) {
             case 'completed':
-                activityMessage = `Completed ${service.category} service for ${service.customer.name}`;
+                activityMessage = `Completed ${service.category} service for ${service.customer?.name}`;
                 activityType = 'service_completed';
                 
                 // Update employee completed jobs count
@@ -64,8 +81,8 @@ export const updateServiceStatus = async (req, res) => {
                     { $inc: { completedJobs: 1 } }
                 );
                 break;
-            case 'in-progress':
-                activityMessage = `Started ${service.category} service for ${service.customer.name}`;
+            case 'in_progress':
+                activityMessage = `Started ${service.category} service for ${service.customer?.name}`;
                 activityType = 'service_scheduled';
                 break;
         }
@@ -81,15 +98,26 @@ export const updateServiceStatus = async (req, res) => {
 
         res.json(service);
     } catch (err) {
-        res.status(400).json({ error: err.message });
+        next(err);
     }
 };
 
 // Add rating to completed service
-export const addServiceRating = async (req, res) => {
+export const addServiceRating = async (req, res, next) => {
     try {
         const { id } = req.params;
         const { rating, feedback } = req.body;
+
+        const existing = await Service.findOne({ serviceId: parseInt(id) }).select('status customer.email').lean();
+        if (!existing) throw ApiError.notFound("Service not found");
+        const customerEmail = String(existing.customer?.email || '').toLowerCase();
+        const callerEmail = String(req.user?.email || '').toLowerCase();
+        if (!isAdminRequest(req) && !(customerEmail && customerEmail === callerEmail)) {
+            throw ApiError.forbidden('You can only rate your own services.');
+        }
+        if (existing.status !== 'completed') {
+            throw ApiError.conflict('You can only rate a service after it is completed.', { code: 'INVALID_STATUS_TRANSITION' });
+        }
 
         const service = await Service.findOneAndUpdate(
             { serviceId: parseInt(id) },
@@ -98,14 +126,14 @@ export const addServiceRating = async (req, res) => {
         );
 
         if (!service) {
-            return res.status(404).json({ message: "Service not found" });
+            throw ApiError.notFound("Service not found");
         }
 
         // Log activity for rating
         await Activity.create({
             empId: service.empId,
             type: 'rating_received',
-            message: `Received ${rating}-star rating from ${service.customer.name}`,
+            message: `Received ${rating}-star rating from ${service.customer?.name || 'Customer'}`,
             serviceId: service.serviceId,
             metadata: { rating }
         });
@@ -116,15 +144,16 @@ export const addServiceRating = async (req, res) => {
             rating: { $exists: true, $ne: null }
         });
 
-        const avgRating = employeeServices.reduce((sum, s) => sum + s.rating, 0) / employeeServices.length;
-        
-        await Employee.findOneAndUpdate(
-            { empId: service.empId },
-            { rating: Math.round(avgRating * 10) / 10 }
-        );
+        if (employeeServices.length) {
+            const avgRating = employeeServices.reduce((sum, s) => sum + s.rating, 0) / employeeServices.length;
+            await Employee.findOneAndUpdate(
+                { empId: service.empId },
+                { rating: Math.round(avgRating * 10) / 10 }
+            );
+        }
 
         res.json(service);
     } catch (err) {
-        res.status(400).json({ error: err.message });
+        next(err);
     }
 };

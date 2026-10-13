@@ -4,11 +4,15 @@ import bcrypt from 'bcryptjs';
 import rateLimit from 'express-rate-limit';
 import User from '../models/User.js';
 import logger from '../utils/logger.js';
+import { ApiError, sendError } from '../utils/ApiError.js';
 
 // Constants
 const DUMMY_HASH = '$2b$10$dummyhashdummyhashdummyhashdum'; // bcrypt hash for non-existent users
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCKOUT_DURATION = 15 * 60 * 1000; // 15 minutes
+const INVALID_CREDENTIALS = 'Invalid email or password';
+const ACCOUNT_DEACTIVATED = 'Your account has been deactivated. Please contact support.';
+const SIGNUP_ROLES = ['user', 'employee'];
 
 // Utility function
 const normalizeIP = (ip) => {
@@ -27,6 +31,23 @@ const auditLog = async (details) => {
   logger.audit(event, userForLog, 'auth', rest);
 };
 
+// Unexpected failures are logged with context; the global handler formats the response.
+const fail = (next, error, context, label) => {
+  if (!error.isOperational) logger.errorWithContext(context, label, error);
+  return next(error);
+};
+
+// The signed-in account's User id (employees carry it as `userId`, see authMiddleware).
+const ownUserId = (req) => req.user?.userId || req.user?._id || req.user?.id;
+
+// req.user is a User document for customers/admins but a plain object for
+// employees, so load the User when the document methods are not available.
+const loadUserDoc = async (req) => {
+  if (typeof req.user?.revokeRefreshToken === 'function') return req.user;
+  const id = ownUserId(req);
+  return id ? User.findById(id).select('+refreshTokens') : null;
+};
+
 // Rate limiter
 export const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -39,9 +60,7 @@ export const loginLimiter = rateLimit({
       endpoint: '/login',
       ip: normalizeIP(req.ip)
     });
-    return res.status(429).json({
-      message: 'Too many login attempts, please try again later'
-    });
+    return sendError(res, 429, 'Too many login attempts, please try again later', { code: 'RATE_LIMITED' });
   }
 });
 
@@ -73,57 +92,74 @@ const cookieOptions = {
   maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
 };
 
+// 400 for one invalid field, in the standard shape plus the legacy `field` key.
+const fieldError = (res, field, message) =>
+  sendError(res, 400, message, { code: 'VALIDATION_ERROR', field, errors: [{ field, message }] });
+
+const conflictError = (res, field, message) =>
+  sendError(res, 409, message, { code: 'DUPLICATE', field, errors: [{ field, message }] });
+
 // @desc    Register user
 // @route   POST /api/auth/register
 // @access  Public
-export const register = async (req, res) => {
+export const register = async (req, res, next) => {
   try {
-    const { name, email, phone, password, role } = req.body;
+    const { name, email, phone, password, role } = req.body || {};
+
+    // The route validator already enforces these; kept so the controller is
+    // safe on its own and never reaches email.toLowerCase() with bad input.
+    const trimmedName = typeof name === 'string' ? name.trim() : '';
+    if (trimmedName.length < 2) {
+      return fieldError(res, 'name', 'Please enter your name (at least 2 characters)');
+    }
+
+    const normalizedEmailInput = typeof email === 'string' ? email.trim() : '';
+    if (!normalizedEmailInput) {
+      return fieldError(res, 'email', 'Email is required');
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmailInput)) {
+      return fieldError(res, 'email', 'Please enter a valid email address');
+    }
+
+    if (typeof password !== 'string' || password.length < 6) {
+      return fieldError(res, 'password', 'Password must be at least 6 characters long');
+    }
 
     // Mobile number is mandatory at signup
     const normalizedPhone = (phone || '').toString().trim();
     if (!normalizedPhone) {
-      return res.status(400).json({
-        success: false,
-        message: 'Mobile number is required',
-        field: 'phone'
-      });
+      return fieldError(res, 'phone', 'Mobile number is required');
     }
     if (!/^[0-9]{10}$/.test(normalizedPhone)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please enter a valid 10-digit mobile number',
-        field: 'phone'
-      });
+      return fieldError(res, 'phone', 'Please enter a valid 10-digit mobile number');
+    }
+
+    // Self-signup can only create customer or employee accounts.
+    const normalizedRole = (role || 'user').toString().trim().toLowerCase();
+    if (!SIGNUP_ROLES.includes(normalizedRole)) {
+      return fieldError(res, 'role', 'Role must be either user or employee');
     }
 
     // Check if user already exists
-    const normalizedEmail = email.toLowerCase();
+    const normalizedEmail = normalizedEmailInput.toLowerCase();
     const existingEmail = await User.findOne({ email: normalizedEmail });
     if (existingEmail) {
-      return res.status(400).json({
-        success: false,
-        message: 'User with this email already exists'
-      });
+      return conflictError(res, 'email', 'Email is already registered');
     }
 
     // Mobile number must be unique
     const existingPhone = await User.findOne({ phone: normalizedPhone });
     if (existingPhone) {
-      return res.status(400).json({
-        success: false,
-        message: 'User with this phone already exists',
-        field: 'phone'
-      });
+      return conflictError(res, 'phone', 'Mobile number is already registered');
     }
 
     // Create user
     const user = await User.create({
-      name,
+      name: trimmedName,
       email: normalizedEmail,
       phone: normalizedPhone,
       password,
-      role: (role || 'user').toLowerCase(),
+      role: normalizedRole,
       metadata: {
         signupSource: req.body.source || 'web',
         ipAddress: req.ip,
@@ -190,43 +226,17 @@ export const register = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('🔥 SIGNUP CATCH BLOCK ERROR:', error);
-
-    // Handle validation errors
-    if (error.name === 'ValidationError') {
-      const errors = {};
-      Object.keys(error.errors).forEach(key => {
-        errors[key] = error.errors[key].message;
-      });
-      return res.status(400).json({
-        success: false,
-        message: 'Validation failed',
-        errors: errors,
-        errorType: 'ValidationError'
-      });
-    }
-
-    // Handle duplicate key error
+    // Two signups racing past the existence checks hit the unique index.
     if (error.code === 11000) {
-      const field = Object.keys(error.keyPattern)[0];
-      return res.status(400).json({
-        success: false,
-        message: `${field.charAt(0).toUpperCase() + field.slice(1)} already exists`,
-        field: field,
-        errorType: 'DuplicateKey'
-      });
+      const field = Object.keys(error.keyPattern || error.keyValue || {})[0] || 'email';
+      return conflictError(res, field, field === 'phone'
+        ? 'Mobile number is already registered'
+        : 'Email is already registered');
     }
 
-    logger.errorWithContext(
-      { email: req.body.email },
-      'User registration error',
-      error
-    );
-    res.status(500).json({
-      success: false,
-      message: 'Server error during registration',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    // Mongoose ValidationError / anything else: the global handler maps it
+    // (400 with field errors, or a generic 500).
+    return fail(next, error, { email: req.body?.email }, 'User registration error');
   }
 };
 
@@ -236,12 +246,9 @@ export const signup = register;
 // @desc    Login user
 // @route   POST /api/auth/login
 // @access  Public
-// @desc    Login user
-// @route   POST /api/auth/login
-// @access  Public
-export const login = async (req, res) => {
+export const login = async (req, res, next) => {
   const startTime = Date.now(); // For timing attack prevention
-  const { email, phone, identifier, password } = req.body;
+  const { email, phone, identifier, password } = req.body || {};
   const ip = normalizeIP(req.ip);
   const userAgent = req.get('User-Agent');
 
@@ -251,9 +258,18 @@ export const login = async (req, res) => {
   const loginMethod = isPhoneLogin ? 'phone' : 'email';
 
   // Input validation
-  if (!loginId || !password) {
-    return res.status(400).json({ message: 'Email or mobile number and password are required' });
+  if (!loginId) {
+    return fieldError(res, 'identifier', 'Email or mobile number is required');
   }
+  if (typeof password !== 'string' || !password) {
+    return fieldError(res, 'password', 'Password is required');
+  }
+
+  // Same response time whether or not the account exists.
+  const delayFailure = async () => {
+    const elapsed = Date.now() - startTime;
+    await new Promise(resolve => setTimeout(resolve, Math.max(500 - elapsed, 0)));
+  };
 
   try {
     // 1. Find user by mobile number or email (with password field explicitly selected)
@@ -264,14 +280,14 @@ export const login = async (req, res) => {
     const user = await User.findOne(query)
       .select('+password +failedAttempts +lockedUntil +loginCount +refreshTokens');
 
-    // 2. Check if user exists (with timing attack protection)
-    const dummyCompare = bcrypt.compare(password, DUMMY_HASH);
-    if (!user) {
+    // 2. Check if user exists (with timing attack protection). Soft-deleted
+    // accounts are treated as non-existent.
+    if (!user || user.isDeleted === true) {
       await Promise.all([
-        dummyCompare,
+        bcrypt.compare(password, DUMMY_HASH).catch(() => false),
         auditLog({
           event: 'login_failed',
-          reason: 'user_not_found',
+          reason: user ? 'account_deleted' : 'user_not_found',
           email: isPhoneLogin ? undefined : loginId.toLowerCase(),
           identifier: loginId,
           loginMethod,
@@ -280,14 +296,8 @@ export const login = async (req, res) => {
         })
       ]);
 
-      // Consistent timing regardless of user existence
-      const elapsed = Date.now() - startTime;
-      const delay = Math.max(500 - elapsed, 0);
-      await new Promise(resolve => setTimeout(resolve, delay));
-
-      return res.status(401).json({
-        message: 'Invalid credentials' // Generic message
-      });
+      await delayFailure();
+      return sendError(res, 401, INVALID_CREDENTIALS, { code: 'INVALID_CREDENTIALS' }); // Generic message
     }
 
     // 3. Check account lockout
@@ -302,30 +312,27 @@ export const login = async (req, res) => {
       });
 
       const remainingTime = Math.ceil((user.lockedUntil - Date.now()) / 1000 / 60);
-      return res.status(403).json({
-        message: `Account is temporarily locked. Try again in ${remainingTime} minutes`
-      });
+      return sendError(res, 403,
+        `Account is temporarily locked due to too many failed attempts. Try again in ${remainingTime} minute${remainingTime === 1 ? '' : 's'}.`,
+        { code: 'ACCOUNT_LOCKED' });
     }
 
     // 4. Verify password
     const isMatch = await bcrypt.compare(password, user.password);
 
     if (!isMatch) {
-      // Increment failed attempts atomically
+      // Count the failure and lock the account once the limit is reached.
+      // ($cond is an aggregation operator: inside a plain $set MongoDB rejects
+      // the whole update, which turned every wrong password into a 500 and
+      // meant the lockout never actually happened.)
+      const failedAttempts = (user.failedAttempts || 0) + 1;
+      const lockedUntil = failedAttempts >= MAX_FAILED_ATTEMPTS
+        ? new Date(Date.now() + LOCKOUT_DURATION)
+        : null;
+
       const updatedUser = await User.findOneAndUpdate(
         { _id: user._id },
-        {
-          $inc: { failedAttempts: 1 },
-          $set: {
-            lockedUntil: {
-              $cond: {
-                if: { $gte: ['$failedAttempts', MAX_FAILED_ATTEMPTS - 1] },
-                then: new Date(Date.now() + LOCKOUT_DURATION),
-                else: null
-              }
-            }
-          }
-        },
+        { $set: { failedAttempts, lockedUntil } },
         { new: true }
       );
 
@@ -338,12 +345,14 @@ export const login = async (req, res) => {
         userAgent
       });
 
-      // Consistent delay
-      const elapsed = Date.now() - startTime;
-      const delay = Math.max(500 - elapsed, 0);
-      await new Promise(resolve => setTimeout(resolve, delay));
+      await delayFailure();
+      return sendError(res, 401, INVALID_CREDENTIALS, { code: 'INVALID_CREDENTIALS' });
+    }
 
-      return res.status(401).json({ message: 'Invalid credentials' });
+    // Correct password, but an admin has deactivated the account.
+    if (user.isActive === false) {
+      await auditLog({ event: 'login_blocked', reason: 'account_deactivated', userId: user._id, loginMethod, ip, userAgent });
+      return sendError(res, 403, ACCOUNT_DEACTIVATED, { code: 'ACCOUNT_DEACTIVATED' });
     }
 
     // 5. Successful login - atomic update
@@ -370,17 +379,7 @@ export const login = async (req, res) => {
       loginCount: user.loginCount + 1
     });
 
-    // 7. Generate JWT token (with short expiry) -- Using existing generateTokens helper if possible, 
-    // but the snippet provided custom JWT generation. I will use the generateTokens helper I see in the file or adapt.
-    // The snippet uses jwt.sign directly.
-    // The existing code has `generateTokens` helper. I will use it to be consistent with register/refresh, OR follow snippet.
-    // Snippet: 
-    // const token = jwt.sign(..., { expiresIn: '24h' });
-    // My generateTokens: { accessToken (15m), refreshToken (7d) }.
-    // The snippet is for a simpler auth (single token?). But my system has refresh tokens.
-    // I should MAINTAIN the refresh token architecture. The user "Enhanced User Schema" includes refresh tokens.
-    // So I will use `generateTokens` helper.
-
+    // 7. Access token + rotating refresh token (same helper as register/refresh).
     const { accessToken, refreshToken, refreshTokenExpires } = generateTokens(user);
 
     // Store refresh token
@@ -393,14 +392,10 @@ export const login = async (req, res) => {
     res.cookie('accessToken', accessToken, cookieOptions);
     res.cookie('refreshToken', refreshToken, cookieOptions);
 
-    // 9. Response (sanitized user data)
+    // 9. Response (sanitized user data). Both `token` and `tokens` are read by the frontend.
     res.status(200).json({
       success: true,
-      token: accessToken, // Frontend might expect 'token' or 'accessToken'. Existing code returns 'tokens: { accessToken, ... }'.
-      // Snippet returns { token, user }. Existing returns { success, message, user, tokens }.
-      // I will return a superset to avoid breaking frontend?
-      // Snippet: res.status(200).json({ token, user: { ... } });
-      // I will return { success: true, token: accessToken, tokens: { ... }, user: ... }
+      token: accessToken,
       tokens: {
         accessToken,
         refreshToken
@@ -418,8 +413,6 @@ export const login = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Login error:', error);
-
     await auditLog({
       event: 'login_error',
       error: error.message,
@@ -430,23 +423,20 @@ export const login = async (req, res) => {
       timestamp: new Date()
     });
 
-    res.status(500).json({ message: 'Internal server error' });
+    return fail(next, error, { identifier: loginId }, 'Login error');
   }
 };
 
 // @desc    Get current user
 // @route   GET /api/auth/me
 // @access  Private
-export const getMe = async (req, res) => {
+export const getMe = async (req, res, next) => {
   try {
-    const user = await User.findById(req.user._id)
+    const user = await User.findById(ownUserId(req))
       .select('-password -refreshTokens -__v');
 
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
+      throw ApiError.notFound('User not found');
     }
 
     res.status(200).json({
@@ -454,28 +444,21 @@ export const getMe = async (req, res) => {
       user
     });
   } catch (error) {
-    logger.errorWithContext(
-      { userId: req.user._id },
-      'Get current user error',
-      error
-    );
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
+    return fail(next, error, { userId: ownUserId(req) }, 'Get current user error');
   }
 };
 
 // @desc    Logout user
 // @route   GET /api/auth/logout
 // @access  Private
-export const logout = async (req, res) => {
+export const logout = async (req, res, next) => {
   try {
-    const refreshToken = req.cookies.refreshToken || req.body.refreshToken;
+    const refreshToken = req.cookies?.refreshToken || req.body?.refreshToken;
 
     if (refreshToken) {
       // Revoke refresh token
-      await req.user.revokeRefreshToken(refreshToken);
+      const user = await loadUserDoc(req);
+      if (user) await user.revokeRefreshToken(refreshToken);
     }
 
     // Clear cookies
@@ -489,45 +472,39 @@ export const logout = async (req, res) => {
       message: 'Logged out successfully'
     });
   } catch (error) {
-    logger.errorWithContext(
-      { userId: req.user._id },
-      'Logout error',
-      error
-    );
-    res.status(500).json({
-      success: false,
-      message: 'Server error during logout'
-    });
+    return fail(next, error, { userId: ownUserId(req) }, 'Logout error');
   }
 };
 
 // @desc    Refresh access token
 // @route   POST /api/auth/refresh-token
 // @access  Public (with refresh token)
-export const refreshToken = async (req, res) => {
+export const refreshToken = async (req, res, next) => {
   try {
-    const refreshToken = req.cookies.refreshToken || req.body.refreshToken;
+    const refreshToken = req.cookies?.refreshToken || req.body?.refreshToken;
 
-    if (!refreshToken) {
-      return res.status(401).json({
-        success: false,
-        message: 'Refresh token is required'
-      });
+    if (!refreshToken || typeof refreshToken !== 'string') {
+      return fieldError(res, 'refreshToken', 'Refresh token is required');
     }
 
     // Find user with this refresh token
     const user = await User.findOne({
-      'refreshTokens.token': refreshToken,
-      'refreshTokens.isRevoked': false,
-      'refreshTokens.expiresAt': { $gt: new Date() }
+      refreshTokens: {
+        $elemMatch: {
+          token: refreshToken,
+          isRevoked: false,
+          expiresAt: { $gt: new Date() }
+        }
+      }
     }).select('+refreshTokens');
 
     if (!user) {
       logger.warn('Refresh token attempt: Invalid or expired token');
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid or expired refresh token'
-      });
+      return sendError(res, 401, 'Your session has expired. Please log in again.', { code: 'INVALID_REFRESH_TOKEN' });
+    }
+
+    if (user.isActive === false || user.isDeleted === true) {
+      return sendError(res, 403, ACCOUNT_DEACTIVATED, { code: 'ACCOUNT_DEACTIVATED' });
     }
 
     // Generate new tokens
@@ -557,20 +534,20 @@ export const refreshToken = async (req, res) => {
       }
     });
   } catch (error) {
-    logger.error('Token refresh error', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error during token refresh'
-    });
+    return fail(next, error, {}, 'Token refresh error');
   }
 };
 
 // @desc    Revoke all refresh tokens (for security)
 // @route   POST /api/auth/revoke-all
 // @access  Private
-export const revokeAllTokens = async (req, res) => {
+export const revokeAllTokens = async (req, res, next) => {
   try {
-    await req.user.revokeAllRefreshTokens();
+    const user = await loadUserDoc(req);
+    if (!user) {
+      throw ApiError.notFound('User account not found');
+    }
+    await user.revokeAllRefreshTokens();
 
     // Clear cookies
     res.clearCookie('accessToken');
@@ -583,40 +560,36 @@ export const revokeAllTokens = async (req, res) => {
       message: 'All sessions have been revoked. Please login again.'
     });
   } catch (error) {
-    logger.errorWithContext(
-      { userId: req.user._id },
-      'Revoke all tokens error',
-      error
-    );
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
+    return fail(next, error, { userId: ownUserId(req) }, 'Revoke all tokens error');
   }
 };
 
 // @desc    Employee Login (Simplified/Passwordless for employees if needed)
 // @route   POST /api/auth/employee-login
 // @access  Public
-export const employeeLogin = async (req, res) => {
-  const { email } = req.body;
+export const employeeLogin = async (req, res, next) => {
+  const { email } = req.body || {};
   const ip = normalizeIP(req.ip);
   const userAgent = req.get('User-Agent');
 
-  if (!email) {
-    return res.status(400).json({ message: 'Email is required' });
+  if (!email || typeof email !== 'string' || !email.trim()) {
+    return fieldError(res, 'email', 'Email is required');
   }
 
   try {
     // 1. Find user
     const user = await User.findOne({ email: email.toLowerCase().trim() });
 
-    if (!user) {
-      return res.status(401).json({ message: 'Employee not found' });
+    if (!user || user.isDeleted === true) {
+      return sendError(res, 401, 'No employee account found for this email', { code: 'INVALID_CREDENTIALS' });
     }
 
     if (user.role !== 'employee' && user.role !== 'admin') {
-      return res.status(403).json({ message: 'Not authorized as employee' });
+      return sendError(res, 403, 'This account is not registered as an employee', { code: 'NOT_EMPLOYEE' });
+    }
+
+    if (user.isActive === false) {
+      return sendError(res, 403, ACCOUNT_DEACTIVATED, { code: 'ACCOUNT_DEACTIVATED' });
     }
 
     // 2. Auto-sync/create Employee record if missing
@@ -670,38 +643,42 @@ export const employeeLogin = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Employee login error:', error);
-    res.status(500).json({ message: 'Server error during employee login' });
+    return fail(next, error, { email }, 'Employee login error');
   }
 };
 
 // @desc    Get User Profile
 // @route   GET /api/auth/profile
 // @access  Private
-export const getProfile = async (req, res) => {
+export const getProfile = async (req, res, next) => {
   try {
-    const user = await User.findById(req.user._id).select("-password");
-    if (!user) return res.status(404).json({ success: false, message: "User not found" });
+    const user = await User.findById(ownUserId(req)).select("-password");
+    if (!user) throw ApiError.notFound('User not found');
 
     res.json({ success: true, user });
-  } catch (err) {
-    console.error('Get profile error:', err);
-    res.status(500).json({ success: false, message: "Server error" });
+  } catch (error) {
+    return fail(next, error, { userId: ownUserId(req) }, 'Get profile error');
   }
 };
 
 // @desc    Update User Profile
 // @route   PUT /api/auth/profile
 // @access  Private
-export const updateProfile = async (req, res) => {
-  const { name, phone, address, avatar } = req.body;
+export const updateProfile = async (req, res, next) => {
+  const { name, phone, address, avatar } = req.body || {};
 
   try {
-    const user = await User.findById(req.user._id);
-    if (!user) return res.status(404).json({ success: false, message: "User not found" });
+    const user = await User.findById(ownUserId(req));
+    if (!user) throw ApiError.notFound('User not found');
 
-    if (name) user.name = name;
-    if (phone) user.phone = phone;
+    if (typeof name === 'string' && name.trim()) user.name = name.trim();
+    if (typeof phone === 'string' && phone.trim() && phone.trim() !== user.phone) {
+      const normalizedPhone = phone.trim();
+      // Mobile number identifies an account (see register), so keep it unique.
+      const taken = await User.exists({ phone: normalizedPhone, _id: { $ne: user._id } });
+      if (taken) return conflictError(res, 'phone', 'Mobile number is already registered');
+      user.phone = normalizedPhone;
+    }
     if (address) user.address = address;
     if (avatar) user.avatar = avatar;
 
@@ -719,34 +696,43 @@ export const updateProfile = async (req, res) => {
         avatar: user.avatar
       }
     });
-  } catch (err) {
-    console.error('Update profile error:', err);
-    res.status(500).json({ success: false, message: "Server error" });
+  } catch (error) {
+    return fail(next, error, { userId: ownUserId(req) }, 'Update profile error');
   }
 };
 
 // @desc    Change Password
 // @route   POST /api/auth/change-password
 // @access  Private
-export const changePassword = async (req, res) => {
-  const userId = req.user.userId || req.user._id || req.user.id; // Prioritize userId (User ID) over id (Employee ID)
+export const changePassword = async (req, res, next) => {
+  const userId = ownUserId(req); // Prioritize userId (User ID) over id (Employee ID)
 
-  const { currentPassword, newPassword } = req.body;
+  const { currentPassword, newPassword } = req.body || {};
 
-  if (!currentPassword || !newPassword) {
-    return res.status(400).json({ message: 'All fields are required' });
+  // 400, never 401: a 401 would make the frontend log the user out.
+  if (!currentPassword) {
+    return fieldError(res, 'currentPassword', 'Current password is required');
+  }
+  if (typeof newPassword !== 'string' || newPassword.length < 6) {
+    return fieldError(res, 'newPassword', newPassword ? 'New password must be at least 6 characters long' : 'New password is required');
+  }
+  if (newPassword === currentPassword) {
+    return fieldError(res, 'newPassword', 'New password must be different from your current password');
   }
 
   try {
     const user = await User.findById(userId).select('+password');
 
     if (!user) {
-      return res.status(404).json({ message: 'User account not found', debugId: userId });
+      throw ApiError.notFound('User account not found');
     }
 
-    const isMatch = await user.comparePassword(currentPassword);
+    const isMatch = await user.comparePassword(String(currentPassword));
     if (!isMatch) {
-      return res.status(401).json({ message: 'Current password is incorrect' });
+      return sendError(res, 400, 'Current password is incorrect', {
+        code: 'INVALID_CURRENT_PASSWORD',
+        errors: [{ field: 'currentPassword', message: 'Current password is incorrect' }]
+      });
     }
 
     // Update password (pre-save hook will hash it)
@@ -754,8 +740,7 @@ export const changePassword = async (req, res) => {
     await user.save();
 
     res.json({ success: true, message: 'Password changed successfully' });
-  } catch (err) {
-    console.error("Change password error:", err);
-    res.status(500).json({ message: 'Server error' });
+  } catch (error) {
+    return fail(next, error, { userId }, 'Change password error');
   }
 };

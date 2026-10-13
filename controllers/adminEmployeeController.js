@@ -3,13 +3,14 @@ import Employee from "../models/adminEmployee.js";
 import Booking from "../models/Booking.js";
 import { cache } from "../utils/helpers.js";
 import { persistAvatar } from '../utils/avatarStorage.js';
+import { ApiError } from "../utils/ApiError.js";
 
 /**
  * @desc    Search and list employees with aggregated stats
  * @route   GET /api/employees
  * @access  Private/Admin
  */
-export const searchEmployees = async (req, res) => {
+export const searchEmployees = async (req, res, next) => {
     try {
 
         // Build query based on status param
@@ -175,16 +176,7 @@ export const searchEmployees = async (req, res) => {
 
         res.json(formattedEmployees);
     } catch (err) {
-        console.error("❌ EMPLOYEE API ERROR (searchEmployees):", {
-            message: err.message,
-            stack: err.stack,
-            query: req.query
-        });
-        res.status(500).json({ 
-            success: false, 
-            message: "Failed to load employee list",
-            error: process.env.NODE_ENV === 'development' ? err.message : undefined
-        });
+        next(err);
     }
 };
 
@@ -193,11 +185,11 @@ export const searchEmployees = async (req, res) => {
  * @route   GET /api/employees/profile
  * @access  Private
  */
-export const getEmployeeProfile = async (req, res) => {
+export const getEmployeeProfile = async (req, res, next) => {
     try {
 
         if (!req.user?.email) {
-            return res.status(400).json({ message: "Invalid user data - email missing" });
+            throw ApiError.badRequest("Your account has no email address, so no employee profile can be loaded");
         }
 
         let employee = await Employee.findOne({ email: req.user.email });
@@ -288,8 +280,7 @@ export const getEmployeeProfile = async (req, res) => {
 
         res.json(profile);
     } catch (err) {
-        console.error("Error in getEmployeeProfile:", err);
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 };
 
@@ -298,7 +289,7 @@ export const getEmployeeProfile = async (req, res) => {
  * @route   GET /api/employees/top-technicians
  * @access  Private/Admin
  */
-export const getTopTechnicians = async (req, res) => {
+export const getTopTechnicians = async (req, res, next) => {
     try {
         const technicians = await Employee.find({ status: 'Active' })
             .sort({ rating: -1 })
@@ -315,7 +306,36 @@ export const getTopTechnicians = async (req, res) => {
 
         res.json(formatted);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
+    }
+};
+
+// Matches an email regardless of case (stored emails are not normalised).
+const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const emailMatcher = (email) => new RegExp(`^${escapeRegex(String(email).trim())}$`, 'i');
+
+/** Employee routes accept the Mongo _id or the numeric empId. */
+const employeeQueryFor = (idParam) => {
+    if (mongoose.Types.ObjectId.isValid(idParam) && new mongoose.Types.ObjectId(idParam).toString() === idParam) {
+        return { _id: idParam };
+    }
+    const empId = Number.parseInt(idParam, 10);
+    if (!Number.isFinite(empId) || String(empId) !== String(idParam).trim()) {
+        throw ApiError.badRequest("Invalid employee ID format");
+    }
+    return { empId };
+};
+
+/** 409 when another employee already uses this email / phone. */
+const assertUniqueContact = async ({ email, phone }, excludeId) => {
+    const notSelf = excludeId ? { _id: { $ne: excludeId } } : {};
+    if (email) {
+        const taken = await Employee.exists({ ...notSelf, email: emailMatcher(email) });
+        if (taken) throw ApiError.conflict("An employee with this email already exists");
+    }
+    if (phone) {
+        const taken = await Employee.exists({ ...notSelf, phone: String(phone).trim() });
+        if (taken) throw ApiError.conflict("An employee with this phone number already exists");
     }
 };
 
@@ -324,9 +344,12 @@ export const getTopTechnicians = async (req, res) => {
  * @route   POST /api/employees
  * @access  Private/Admin
  */
-export const createEmployee = async (req, res) => {
+export const createEmployee = async (req, res, next) => {
     try {
+        // Formats are checked by validate({ body: createEmployee }) on the route.
         const { name, email, phone, role, earnings, status, countryId, stateId, cityId, areaId, address, bio, specialties, certifications } = req.body;
+
+        await assertUniqueContact({ email, phone });
 
         const newEmployee = new Employee({
             empName: name,
@@ -349,9 +372,8 @@ export const createEmployee = async (req, res) => {
         const savedEmployee = await newEmployee.save();
         res.status(201).json(savedEmployee);
     } catch (err) {
-        // `message` as well as `error` — the client reads `message`, and without
-        // it a failed save surfaced in the UI as a bare "An error occurred."
-        res.status(400).json({ message: err.message, error: err.message });
+        // Mongoose validation -> 400, duplicate key -> 409, anything else -> 500.
+        next(err);
     }
 };
 
@@ -360,7 +382,7 @@ export const createEmployee = async (req, res) => {
  * @route   PUT /api/employees/:id
  * @access  Private/Admin
  */
-export const updateEmployeeProfile = async (req, res) => {
+export const updateEmployeeProfile = async (req, res, next) => {
     try {
         const {
             name, empName, email, phone, role, earnings, status,
@@ -368,6 +390,19 @@ export const updateEmployeeProfile = async (req, res) => {
             bio, specialties, certifications, address, avatar,
             settings
         } = req.body;
+
+        const queryObj = employeeQueryFor(req.params.id);
+        const current = await Employee.findOne(queryObj).select('_id email phone').lean();
+        if (!current) throw ApiError.notFound("Employee not found");
+
+        // Only check uniqueness for values that actually change, so records
+        // that already share a phone can still be edited.
+        const emailChanged = email && String(email).trim().toLowerCase() !== String(current.email || '').toLowerCase();
+        const phoneChanged = phone && String(phone).trim() !== String(current.phone || '').trim();
+        await assertUniqueContact({
+            email: emailChanged ? email : undefined,
+            phone: phoneChanged ? phone : undefined
+        }, current._id);
 
         const updateData = {};
         if (name || empName) updateData.empName = name || empName;
@@ -388,25 +423,16 @@ export const updateEmployeeProfile = async (req, res) => {
         if (avatar) updateData.avatar = await persistAvatar(avatar, `emp-${req.params.id || 'x'}`);
         if (settings) updateData.settings = settings;
 
-        const idParam = req.params.id;
-        let queryObj;
-        if (mongoose.Types.ObjectId.isValid(idParam) && new mongoose.Types.ObjectId(idParam).toString() === idParam) {
-            queryObj = { _id: idParam };
-        } else {
-            queryObj = { empId: parseInt(idParam) };
-        }
-
         const employee = await Employee.findOneAndUpdate(
-            queryObj,
+            { _id: current._id },
             { $set: updateData },
             { new: true, runValidators: true }
         );
 
-        if (!employee) return res.status(404).json({ message: "Employee not found" });
+        if (!employee) throw ApiError.notFound("Employee not found");
         res.json(employee);
     } catch (err) {
-        console.error("Update Profile Error:", err);
-        res.status(400).json({ message: err.message, error: err.message });
+        next(err);
     }
 };
 
@@ -415,16 +441,12 @@ export const updateEmployeeProfile = async (req, res) => {
  * @route   DELETE /api/employees/:id
  * @access  Private/Admin
  */
-export const deleteEmployee = async (req, res) => {
+export const deleteEmployee = async (req, res, next) => {
     try {
-        const idParam = req.params.id;
-        const isObjectId = mongoose.Types.ObjectId.isValid(idParam);
-        const queryObj = isObjectId ? { _id: idParam } : { empId: parseInt(idParam) };
-
-        const employee = await Employee.findOneAndDelete(queryObj);
-        if (!employee) return res.status(404).json({ message: "Employee not found" });
+        const employee = await Employee.findOneAndDelete(employeeQueryFor(req.params.id));
+        if (!employee) throw ApiError.notFound("Employee not found");
         res.json({ message: "Employee deleted successfully" });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 };

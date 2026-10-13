@@ -25,13 +25,15 @@ const isEmployeeRequest = (req) => req.user?.empId !== undefined && req.user?.em
 const subscriptionRequired = (res, subscription) => {
     const lowBalance = hasSubscriptionAccess(subscription);
     const balance = Number(subscription?.balance) || 0;
+    const message = lowBalance
+        ? `Your subscription balance is ₹${balance}, below the ₹${SERVICE_FEE} service fee. Top up to use your dashboard.`
+        : 'An active subscription is required to receive and work on service requests.';
     return res.status(402).json({
         success: false,
         code: 'SUBSCRIPTION_REQUIRED',
         reason: lowBalance ? 'LOW_BALANCE' : 'NOT_SUBSCRIBED',
-        message: lowBalance
-            ? `Your subscription balance is ₹${balance}, below the ₹${SERVICE_FEE} service fee. Top up to use your dashboard.`
-            : 'An active subscription is required to receive and work on service requests.'
+        message,
+        error: message
     });
 };
 
@@ -52,7 +54,7 @@ export const requireActiveSubscription = async (req, res, next) => {
         return subscriptionRequired(res, employee?.subscription);
     } catch (error) {
         console.error('Subscription check error:', error.message);
-        return res.status(500).json({ success: false, message: 'Could not verify subscription' });
+        return res.status(500).json({ success: false, message: 'Could not verify subscription', error: 'Could not verify subscription' });
     }
 };
 
@@ -83,6 +85,6 @@ export const requireSubscriptionOrPaidJob = async (req, res, next) => {
         return subscriptionRequired(res, sub);
     } catch (error) {
         console.error('Subscription check error:', error.message);
-        return res.status(500).json({ success: false, message: 'Could not verify subscription' });
+        return res.status(500).json({ success: false, message: 'Could not verify subscription', error: 'Could not verify subscription' });
     }
 };

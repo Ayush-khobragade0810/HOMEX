@@ -25,6 +25,7 @@ import { fileURLToPath } from 'url';
 // Import configs and utils
 import logger from './utils/logger.js';
 import socketService from './socket/socketService.js';
+import errorHandler, { notFoundHandler } from './middleware/errorHandler.js';
 
 // Import routes
 import authRoutes from './routes/auth.routes.js';
@@ -117,8 +118,12 @@ app.use(cors({
     if (isWhitelisted || isRenderDomain) {
       callback(null, true);
     } else {
+      // Decline, don't throw: throwing here turns the browser's preflight into
+      // a 500 ("No 'Access-Control-Allow-Origin' header" plus a server error in
+      // the logs). Declining answers the preflight normally, just without the
+      // allow header, which is what the browser expects for a blocked origin.
       console.warn(`🚦 [CORS REJECTED]: ${origin}`);
-      callback(new Error('Not allowed by CORS'));
+      callback(null, false);
     }
   },
   credentials: true
@@ -201,7 +206,7 @@ app.get('/api/csrf-token', csrfProtection, (req, res) => {
     res.json({ csrfToken: token });
   } catch (err) {
     logger.error('CSRF Token generation failed:', err);
-    res.status(500).json({ success: false, message: 'Failed to generate CSRF token' });
+    res.status(500).json({ success: false, message: 'Failed to generate CSRF token', error: 'Failed to generate CSRF token' });
   }
 });
 
@@ -244,38 +249,11 @@ app.get('/api/ws-health', (req, res) => {
 });
 
 // 4. ERROR HANDLING
-app.use('/api', (req, res) => {
-  console.warn(`⚠️  [404 NOT FOUND] ${req.method} ${req.originalUrl}`);
-  res.status(404).json({
-    success: false,
-    message: `API Route not found: ${req.originalUrl}`,
-    hint: 'Check if the prefix /api is being correctly handled by your proxy.'
-  });
-});
-
-app.use((err, req, res, next) => {
-  if (err.name === 'UnauthorizedError') {
-    return res.status(401).json({ success: false, message: 'Invalid token' });
-  }
-  const statusCode = err.statusCode || 500;
-  const isDev = process.env.NODE_ENV === 'development';
-  const response = {
-    success: false,
-    message: err.message || 'Internal Server Error'
-  };
-  if (isDev) {
-    response.stack = err.stack;
-    logger.error(err);
-  } else {
-    logger.error({
-      message: err.message,
-      stack: err.stack,
-      path: req.path,
-      method: req.method
-    }, 'Unhandled Server Error');
-  }
-  res.status(statusCode).json(response);
-});
+// Unknown API routes get a JSON 404; every error thrown or passed to next()
+// is turned into { success: false, message, error, code?, errors? } with the
+// right status code.
+app.use('/api', notFoundHandler);
+app.use(errorHandler);
 
 // 5. START SERVER
 const serverListener = httpServer.listen(PORT, '0.0.0.0', () => {

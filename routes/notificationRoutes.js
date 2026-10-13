@@ -3,9 +3,12 @@ import {
     getNotifications,
     markNotificationAsRead,
     getUnreadCount,
-    markAllNotificationsAsRead
+    markAllNotificationsAsRead,
+    deleteNotification
 } from '../controllers/notificationController.js';
 import { protect } from '../middleware/authMiddleware.js';
+import { validate } from '../middleware/validate.js';
+import { notificationIdParams } from '../validators/notification.js';
 
 const router = express.Router();
 
@@ -19,19 +22,12 @@ router.get('/', getNotifications);
 router.get('/unread-count', getUnreadCount);
 
 // PUT /api/notifications/:id/read - Mark notification as read
-router.put('/:id/read', markNotificationAsRead);
+router.put('/:id/read', validate({ params: notificationIdParams }), markNotificationAsRead);
 
 // PUT /api/notifications/read-all - Mark ALL notifications as read
 router.put('/read-all', markAllNotificationsAsRead);
 
 // DELETE /api/notifications/:id - Delete notification
-router.delete('/:id', async (req, res) => {
-    try {
-        // Implementation here
-        res.json({ success: true, message: 'Notification deleted' });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
+router.delete('/:id', validate({ params: notificationIdParams }), deleteNotification);
 
 export default router;

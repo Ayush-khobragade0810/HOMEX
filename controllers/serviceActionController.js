@@ -8,6 +8,7 @@ import { emitBookingUpdate } from "../socket.js";
 import mongoose from "mongoose";
 import { computeBilling, normalizeExtraService, bookingTotals } from "../utils/billing.js";
 import { chargeForStatusChange, employeeCancellationFields } from "../services/serviceFeeService.js";
+import { ApiError, sendError } from "../utils/ApiError.js";
 
 const parseClockToMinutes = (value) => {
     if (!value) return null;
@@ -49,264 +50,311 @@ const getBookingDuration = (booking) =>
     calculateDurationFromTimeSlot(booking.schedule?.timeSlot) ||
     60;
 
+// ---------------------------------------------------------------------------
+// Shared guards for the employee job actions.
+// ---------------------------------------------------------------------------
+
+const bookingQueryFor = (id) =>
+    mongoose.Types.ObjectId.isValid(id) ? { _id: id } : { bookingId: id };
+
+const loadBooking = async (id) => {
+    const { default: Booking } = await import('../models/Booking.js');
+    const booking = await Booking.findOne(bookingQueryFor(id)).lean();
+    if (!booking) throw ApiError.notFound('Booking not found');
+    return { Booking, booking };
+};
+
+const isEmployeeRequest = (req) => req.user?.empId !== undefined && req.user?.empId !== null;
+
+/** Statuses compared case-insensitively: "in progress" / "in-progress" -> IN_PROGRESS. */
+const normStatus = (s) => String(s || '').trim().toUpperCase().replace(/[\s-]+/g, '_');
+
+const ENDED = { COMPLETED: 'completed', CANCELLED: 'cancelled', CANCELED: 'cancelled', REJECTED: 'rejected' };
+const STARTED = new Set(['IN_PROGRESS', 'STARTED', 'CURRENT']);
+const UNDER_WAY = new Set([...STARTED, 'NAVIGATING', 'EN_ROUTE']);
+
+/** Admins may act on any booking; employees only on bookings assigned to them. */
+const assertCanActOn = (req, booking) => {
+    if (isAdminRequest(req)) return;
+    if (!isEmployeeRequest(req)) throw ApiError.forbidden('Only the assigned employee can update this service.');
+    const techId = booking.assignedTo?.technicianId?._id || booking.assignedTo?.technicianId;
+    if (!techId || String(techId) !== String(req.user.id)) {
+        throw ApiError.forbidden('This service is not assigned to you.', { code: 'NOT_ASSIGNED' });
+    }
+};
+
+/** 409 for a step that doesn't fit where the job is now. */
+const assertTransition = (booking, action) => {
+    const current = normStatus(booking.status);
+    const conflict = (message) => ApiError.conflict(message, { code: 'INVALID_STATUS_TRANSITION' });
+
+    if (ENDED[current]) throw conflict(`Cannot ${action} this service — it is already ${ENDED[current]}.`);
+
+    if (action === 'accept' || action === 'confirm') {
+        if (UNDER_WAY.has(current)) throw conflict('This service is already in progress.');
+        if (current === 'ACCEPTED') throw conflict('This service has already been accepted.');
+    }
+    if (action === 'start' && STARTED.has(current)) {
+        throw conflict('This service has already been started.');
+    }
+    if (action === 'complete' && !UNDER_WAY.has(current)) {
+        throw conflict('Start the service before marking it complete.');
+    }
+};
+
+/** Sends a failed service-fee check (402 INSUFFICIENT_BALANCE, 403 NOT_ASSIGNED, 409 FEE_CONFLICT...). */
+const sendFeeError = (res, fee) => {
+    // eslint-disable-next-line no-unused-vars
+    const { message, success, ...extra } = fee.body || {};
+    return sendError(res, fee.status, message || 'Could not take this service', extra);
+};
+
+/**
+ * Applies `update` only if the booking is still in the status we checked, so
+ * two concurrent actions can't both pass the transition check.
+ */
+const applyStatusUpdate = async (Booking, booking, update) => {
+    const updated = await Booking.findOneAndUpdate(
+        { _id: booking._id, status: booking.status ?? null },
+        update,
+        { new: true }
+    ).populate('userId').populate('assignedTo.technicianId');
+    if (!updated) {
+        throw ApiError.conflict('This service was just updated by someone else. Refresh and try again.', { code: 'INVALID_STATUS_TRANSITION' });
+    }
+    return updated;
+};
+
+const STATUS_MAP = {
+    'confirmed': 'ACCEPTED',
+    'in_progress': 'IN_PROGRESS',
+    'completed': 'COMPLETED',
+    'cancelled': 'CANCELLED',
+    'scheduled': 'PENDING',
+    'en_route': 'NAVIGATING',
+    'accepted': 'ACCEPTED'
+};
+
 // Update Status (Generic)
 export const updateServiceStatus = async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { status, notes } = req.body;
+    const { id } = req.params;
+    const status = String(req.body.status).trim();
 
-        const { default: Booking } = await import('../models/Booking.js');
+    const { Booking, booking } = await loadBooking(id);
+    assertCanActOn(req, booking);
 
-        const statusMap = {
-            'confirmed': 'ACCEPTED',
-            'in_progress': 'IN_PROGRESS',
-            'completed': 'COMPLETED',
-            'cancelled': 'CANCELLED',
-            'scheduled': 'PENDING',
-            'en_route': 'NAVIGATING',
-            'accepted': 'ACCEPTED'
-        };
-        const bookingStatus = statusMap[status] || status.toUpperCase();
-        const query = mongoose.Types.ObjectId.isValid(id) ? { _id: id } : { bookingId: id };
-
-        const fee = await chargeForStatusChange(req, id, bookingStatus);
-        if (!fee.ok) return res.status(fee.status).json(fee.body);
-
-        const booking = await Booking.findOneAndUpdate(
-            query,
-            { status: bookingStatus, updatedAt: new Date(), ...employeeCancellationFields(req, bookingStatus) },
-            { new: true }
-        ).populate('userId');
-
-        if (!booking) return res.status(404).json({ message: "Booking not found" });
-
-        emitBookingUpdate(booking.bookingId, bookingStatus, booking.toObject());
-        res.json({ message: `Service status updated to ${status}`, service: { ...booking.toObject(), id: booking._id } });
-    } catch (err) {
-        res.status(400).json({ error: err.message });
+    const current = normStatus(booking.status);
+    if (ENDED[current]) {
+        throw ApiError.conflict(`Cannot change the status of a booking that is already ${ENDED[current]}.`, { code: 'INVALID_STATUS_TRANSITION' });
     }
+
+    const bookingStatus = STATUS_MAP[status.toLowerCase()] || status.toUpperCase();
+
+    const fee = await chargeForStatusChange(req, id, bookingStatus);
+    if (!fee.ok) return sendFeeError(res, fee);
+
+    const updated = await applyStatusUpdate(Booking, booking, {
+        status: bookingStatus, updatedAt: new Date(), ...employeeCancellationFields(req, bookingStatus)
+    });
+
+    emitBookingUpdate(updated.bookingId, bookingStatus, updated.toObject());
+    res.json({ message: `Service status updated to ${status}`, service: { ...updated.toObject(), id: updated._id } });
 };
 
 // Confirm Service
 export const confirmService = async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { default: Booking } = await import('../models/Booking.js');
-        const query = mongoose.Types.ObjectId.isValid(id) ? { _id: id } : { bookingId: id };
+    const { id } = req.params;
+    const { Booking, booking } = await loadBooking(id);
+    assertCanActOn(req, booking);
+    assertTransition(booking, 'confirm');
 
-        const fee = await chargeForStatusChange(req, id, 'ACCEPTED');
-        if (!fee.ok) return res.status(fee.status).json(fee.body);
+    const fee = await chargeForStatusChange(req, id, 'ACCEPTED');
+    if (!fee.ok) return sendFeeError(res, fee);
 
-        const booking = await Booking.findOneAndUpdate(
-            query,
-            { status: 'ACCEPTED', updatedAt: new Date() },
-            { new: true }
-        ).populate('userId').populate('assignedTo.technicianId');
+    const updated = await applyStatusUpdate(Booking, booking, { status: 'ACCEPTED', updatedAt: new Date() });
 
-        if (!booking) return res.status(404).json({ message: "Booking not found" });
+    emitBookingUpdate(updated.bookingId, 'ACCEPTED', updated.toObject());
+    await Activity.create({
+        empId: updated.assignedTo?.technicianId?._id || req.user.id,
+        type: 'service_scheduled',
+        message: `Confirmed service ${updated.serviceDetails?.title} for ${updated.userId?.name || 'Customer'}`,
+        serviceId: updated._id
+    });
 
-        emitBookingUpdate(booking.bookingId, 'ACCEPTED', booking.toObject());
-        await Activity.create({
-            empId: booking.assignedTo?.technicianId?._id || req.user.id,
-            type: 'service_scheduled',
-            message: `Confirmed service ${booking.serviceDetails?.title} for ${booking.userId?.name || 'Customer'}`,
-            serviceId: booking._id
-        });
-
-        res.json({ message: "Service confirmed successfully", service: { ...booking.toObject(), id: booking._id } });
-    } catch (err) {
-        res.status(400).json({ error: err.message });
-    }
+    res.json({ message: "Service confirmed successfully", service: { ...updated.toObject(), id: updated._id } });
 };
 
 // Start Service
 export const startService = async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { startTime } = req.body;
-        const { default: Booking } = await import('../models/Booking.js');
-        const query = mongoose.Types.ObjectId.isValid(id) ? { _id: id } : { bookingId: id };
+    const { id } = req.params;
+    const { startTime } = req.body;
+    const { Booking, booking } = await loadBooking(id);
+    assertCanActOn(req, booking);
+    assertTransition(booking, 'start');
 
-        const fee = await chargeForStatusChange(req, id, 'IN_PROGRESS');
-        if (!fee.ok) return res.status(fee.status).json(fee.body);
+    const fee = await chargeForStatusChange(req, id, 'IN_PROGRESS');
+    if (!fee.ok) return sendFeeError(res, fee);
 
-        const booking = await Booking.findOneAndUpdate(
-            query,
-            { status: 'IN_PROGRESS', startedAt: startTime || new Date(), updatedAt: new Date() },
-            { new: true }
-        ).populate('userId').populate('assignedTo.technicianId');
+    const updated = await applyStatusUpdate(Booking, booking, {
+        status: 'IN_PROGRESS', startedAt: startTime || new Date(), updatedAt: new Date()
+    });
 
-        if (!booking) return res.status(404).json({ message: "Booking not found" });
+    emitBookingUpdate(updated.bookingId, 'IN_PROGRESS', updated.toObject());
+    await Activity.create({
+        empId: updated.assignedTo?.technicianId?._id || req.user.id,
+        type: 'service_started',
+        message: `Started ${updated.serviceDetails?.title} service for ${updated.userId?.name}`,
+        serviceId: updated._id
+    });
 
-        emitBookingUpdate(booking.bookingId, 'IN_PROGRESS', booking.toObject());
-        await Activity.create({
-            empId: booking.assignedTo?.technicianId?._id || req.user.id,
-            type: 'service_started',
-            message: `Started ${booking.serviceDetails?.title} service for ${booking.userId?.name}`,
-            serviceId: booking._id
-        });
-
-        res.json({ message: "Service started successfully", service: { ...booking.toObject(), id: booking._id } });
-    } catch (err) {
-        res.status(400).json({ error: err.message });
-    }
+    res.json({ message: "Service started successfully", service: { ...updated.toObject(), id: updated._id } });
 };
 
 // Complete Service
 export const completeService = async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { actualEarnings, notes, completionTime, extraServices } = req.body;
-        const { default: Booking } = await import('../models/Booking.js');
-        const query = mongoose.Types.ObjectId.isValid(id) ? { _id: id } : { bookingId: id };
+    const { id } = req.params;
+    const { actualEarnings, notes, completionTime, extraServices } = req.body;
 
-        const existing = await Booking.findOne(query).lean();
-        if (!existing) return res.status(404).json({ message: "Booking not found" });
+    const { Booking, booking: existing } = await loadBooking(id);
+    assertCanActOn(req, existing);
+    assertTransition(existing, 'complete');
 
-        const fee = await chargeForStatusChange(req, id, 'COMPLETED');
-        if (!fee.ok) return res.status(fee.status).json(fee.body);
+    // Same rule as the extra-services endpoints (invoice already finalised).
+    const denied = denyExtraServiceChange(existing, req);
+    if (denied) throw new ApiError(denied.code, denied.message);
 
-        // Append any extra services submitted alongside completion. Duplicates
-        // are intentionally kept as separate line items (business rule).
-        const nextExtras = [...(existing.extraServices || [])];
-        if (Array.isArray(extraServices)) {
-            for (const raw of extraServices) {
-                const line = normalizeExtraService(raw);
-                if (!line.name) continue;
-                nextExtras.push({
-                    ...line,
-                    addedBy: req.user?.id,
-                    addedByRole: isAdminRequest(req) ? 'admin' : 'employee',
-                    addedAt: new Date()
-                });
-            }
+    const fee = await chargeForStatusChange(req, id, 'COMPLETED');
+    if (!fee.ok) return sendFeeError(res, fee);
+
+    // Append any extra services submitted alongside completion. Duplicates
+    // are intentionally kept as separate line items (business rule).
+    const nextExtras = [...(existing.extraServices || [])];
+    if (Array.isArray(extraServices)) {
+        for (const raw of extraServices) {
+            const line = normalizeExtraService(raw || {});
+            if (!line.name) continue;
+            nextExtras.push({
+                ...line,
+                addedBy: req.user?.id,
+                addedByRole: isAdminRequest(req) ? 'admin' : 'employee',
+                addedAt: new Date()
+            });
         }
-
-        // Recompute the invoice from the single source of truth.
-        const billing = computeBilling(existing, { extraServices: nextExtras });
-
-        // The employee records what was actually collected (which may include a
-        // tip); fall back to the computed grand total when not supplied.
-        const denied = denyExtraServiceChange(existing, req);
-        if (denied) return res.status(denied.code).json({ message: denied.message });
-
-        const collected =
-            actualEarnings !== undefined && actualEarnings !== null && actualEarnings !== ''
-                ? Number(actualEarnings)
-                : billing.grandTotal;
-
-        const booking = await Booking.findOneAndUpdate(
-            query,
-            {
-                status: 'COMPLETED',
-                completedAt: completionTime || new Date(),
-                extraServices: nextExtras,
-                billing,
-                'payment.amount': collected,
-                'payment.status': 'paid',
-                technicianNotes: notes,
-                updatedAt: new Date()
-            },
-            { new: true }
-        ).populate('userId').populate('assignedTo.technicianId');
-
-        if (!booking) return res.status(404).json({ message: "Booking not found" });
-
-        // Payment integration: create/update payment record for employee earnings
-        try {
-            const employeeUser = booking.assignedTo?.technicianId;
-            let employeeRecord = null;
-            if (employeeUser) {
-                employeeRecord = await Employee.findOne({ email: employeeUser.email });
-            }
-
-            if (employeeRecord) {
-                const lastPayment = await Payment.findOne().sort({ paymentId: -1 });
-                const newPaymentId = lastPayment ? lastPayment.paymentId + 1 : 1001;
-
-                const earnings = collected;
-                const commissionRate = 30; // 30% default rate
-                const commission = Math.round(earnings * (commissionRate / 100) * 100) / 100;
-                const baseRate = Math.round((earnings - commission) * 100) / 100;
-
-                const durationHours = getBookingDuration(booking) / 60;
-
-                const paymentData = {
-                    paymentId: newPaymentId,
-                    empId: employeeRecord.empId,
-                    employee: employeeRecord._id,
-                    serviceId: booking.bookingId,
-                    customer: {
-                        name: booking.contactIdInfo?.fullName || booking.contactInfo?.fullName || booking.userId?.name || 'Customer',
-                        email: booking.contactIdInfo?.email || booking.contactInfo?.email || booking.userId?.email || '',
-                        phone: booking.contactIdInfo?.phoneNumber || booking.contactInfo?.phoneNumber || booking.userId?.phone || '',
-                        address: booking.location?.completeAddress || booking.location?.address || ''
-                    },
-                    serviceType: booking.serviceDetails?.title || 'Service',
-                    amount: earnings,
-                    commission: commission,
-                    commissionRate: commissionRate,
-                    baseRate: baseRate,
-                    hours: durationHours,
-                    date: new Date(),
-                    status: 'completed',
-                    paymentMethod: booking.payment?.method || 'cash',
-                    transactionId: booking.payment?.transactionId || `TXN-${Date.now()}`
-                };
-
-                let payment = await Payment.findOne({ serviceId: booking.bookingId });
-                const oldAmount = payment ? (payment.status === 'completed' ? payment.baseRate : 0) : 0;
-
-                if (payment) {
-                    payment.amount = earnings;
-                    payment.commission = commission;
-                    payment.baseRate = baseRate;
-                    payment.hours = durationHours;
-                    payment.status = 'completed';
-                    payment.paymentMethod = booking.payment?.method || 'cash';
-                    await payment.save();
-                } else {
-                    payment = await Payment.create(paymentData);
-                }
-
-                // Update employee's wallet balance and earnings
-                const balanceDiff = baseRate - oldAmount;
-                employeeRecord.walletBalance = (employeeRecord.walletBalance || 0) + balanceDiff;
-                employeeRecord.earnings = (employeeRecord.earnings || 0) + balanceDiff;
-                await employeeRecord.save();
-            }
-        } catch (err) {
-            console.error("Error creating/updating payment record:", err);
-        }
-
-        // Remove from Upcoming Payments
-        try {
-            await UpcomingPayment.findOneAndDelete({ serviceId: booking.bookingId });
-        } catch (err) {
-            console.error("Error deleting upcoming payment:", err);
-        }
-
-        emitBookingUpdate(booking.bookingId, 'COMPLETED', booking.toObject());
-        await Activity.create({
-            empId: booking.assignedTo?.technicianId?._id || req.user.id,
-            type: 'service_completed',
-            message: `Completed ${booking.serviceDetails?.title} service for ${booking.userId?.name}`,
-            serviceId: booking._id,
-            metadata: {
-                earnings: collected,
-                extrasTotal: billing.extrasTotal,
-                grandTotal: billing.grandTotal
-            }
-        });
-
-        res.json({
-            message: "Service completed successfully",
-            service: { ...booking.toObject(), id: booking._id },
-            billing
-        });
-    } catch (err) {
-        res.status(400).json({ error: err.message });
     }
+
+    // Recompute the invoice from the single source of truth.
+    const billing = computeBilling(existing, { extraServices: nextExtras });
+
+    // The employee records what was actually collected (which may include a
+    // tip); fall back to the computed grand total when not supplied.
+    const collected =
+        actualEarnings !== undefined && actualEarnings !== null && actualEarnings !== ''
+            ? Number(actualEarnings)
+            : billing.grandTotal;
+
+    const booking = await applyStatusUpdate(Booking, existing, {
+        status: 'COMPLETED',
+        completedAt: completionTime || new Date(),
+        extraServices: nextExtras,
+        billing,
+        'payment.amount': collected,
+        'payment.status': 'paid',
+        technicianNotes: notes,
+        updatedAt: new Date()
+    });
+
+    // Payment integration: create/update payment record for employee earnings
+    try {
+        const employeeUser = booking.assignedTo?.technicianId;
+        let employeeRecord = null;
+        if (employeeUser) {
+            employeeRecord = await Employee.findOne({ email: employeeUser.email });
+        }
+
+        if (employeeRecord) {
+            const lastPayment = await Payment.findOne().sort({ paymentId: -1 });
+            const newPaymentId = lastPayment ? lastPayment.paymentId + 1 : 1001;
+
+            const earnings = collected;
+            const commissionRate = 30; // 30% default rate
+            const commission = Math.round(earnings * (commissionRate / 100) * 100) / 100;
+            const baseRate = Math.round((earnings - commission) * 100) / 100;
+
+            const durationHours = getBookingDuration(booking) / 60;
+
+            const paymentData = {
+                paymentId: newPaymentId,
+                empId: employeeRecord.empId,
+                employee: employeeRecord._id,
+                serviceId: booking.bookingId,
+                customer: {
+                    name: booking.contactIdInfo?.fullName || booking.contactInfo?.fullName || booking.userId?.name || 'Customer',
+                    email: booking.contactIdInfo?.email || booking.contactInfo?.email || booking.userId?.email || '',
+                    phone: booking.contactIdInfo?.phoneNumber || booking.contactInfo?.phoneNumber || booking.userId?.phone || '',
+                    address: booking.location?.completeAddress || booking.location?.address || ''
+                },
+                serviceType: booking.serviceDetails?.title || 'Service',
+                amount: earnings,
+                commission: commission,
+                commissionRate: commissionRate,
+                baseRate: baseRate,
+                hours: durationHours,
+                date: new Date(),
+                status: 'completed',
+                paymentMethod: booking.payment?.method || 'cash',
+                transactionId: booking.payment?.transactionId || `TXN-${Date.now()}`
+            };
+
+            let payment = await Payment.findOne({ serviceId: booking.bookingId });
+            const oldAmount = payment ? (payment.status === 'completed' ? payment.baseRate : 0) : 0;
+
+            if (payment) {
+                payment.amount = earnings;
+                payment.commission = commission;
+                payment.baseRate = baseRate;
+                payment.hours = durationHours;
+                payment.status = 'completed';
+                payment.paymentMethod = booking.payment?.method || 'cash';
+                await payment.save();
+            } else {
+                payment = await Payment.create(paymentData);
+            }
+
+            // Update employee's wallet balance and earnings
+            const balanceDiff = baseRate - oldAmount;
+            employeeRecord.walletBalance = (employeeRecord.walletBalance || 0) + balanceDiff;
+            employeeRecord.earnings = (employeeRecord.earnings || 0) + balanceDiff;
+            await employeeRecord.save();
+        }
+    } catch (err) {
+        console.error("Error creating/updating payment record:", err);
+    }
+
+    // Remove from Upcoming Payments
+    try {
+        await UpcomingPayment.findOneAndDelete({ serviceId: booking.bookingId });
+    } catch (err) {
+        console.error("Error deleting upcoming payment:", err);
+    }
+
+    emitBookingUpdate(booking.bookingId, 'COMPLETED', booking.toObject());
+    await Activity.create({
+        empId: booking.assignedTo?.technicianId?._id || req.user.id,
+        type: 'service_completed',
+        message: `Completed ${booking.serviceDetails?.title} service for ${booking.userId?.name}`,
+        serviceId: booking._id,
+        metadata: {
+            earnings: collected,
+            extrasTotal: billing.extrasTotal,
+            grandTotal: billing.grandTotal
+        }
+    });
+
+    res.json({
+        message: "Service completed successfully",
+        service: { ...booking.toObject(), id: booking._id },
+        billing
+    });
 };
 
 // ---------------------------------------------------------------------------
@@ -374,199 +422,190 @@ const saveExtras = async (Booking, query, booking, nextExtras) => {
     };
 };
 
+/** Load a booking for the extra-services endpoints, or 404. */
+const requireBookingForBilling = async (id) => {
+    const loaded = await loadBookingForBilling(id);
+    if (!loaded.booking) throw ApiError.notFound('Booking not found');
+    return loaded;
+};
+
+/** Throws the 403/409 from denyExtraServiceChange, if any. */
+const assertCanChangeExtras = (booking, req) => {
+    // Only the assigned employee (or an admin) may change the bill.
+    assertCanActOn(req, booking);
+    const denied = denyExtraServiceChange(booking, req);
+    if (denied) {
+        throw new ApiError(denied.code, denied.message, denied.code === 403 ? { code: 'NOT_ASSIGNED' } : undefined);
+    }
+};
+
 // GET /:id/extra-services — list extras with current totals
 export const getExtraServices = async (req, res) => {
-    try {
-        const { booking } = await loadBookingForBilling(req.params.id);
-        if (!booking) return res.status(404).json({ message: 'Booking not found' });
+    const { booking } = await requireBookingForBilling(req.params.id);
 
-        res.json({
-            success: true,
-            bookingId: booking.bookingId,
-            extraServices: booking.extraServices || [],
-            // Recomputed on read so legacy bookings (saved before this feature)
-            // still return a correct breakdown without a migration.
-            billing: computeBilling(booking)
-        });
-    } catch (err) {
-        res.status(400).json({ error: err.message });
-    }
+    // Employees may only see the bill of a job assigned to them.
+    if (isEmployeeRequest(req) && !isAdminRequest(req)) assertCanActOn(req, booking);
+
+    res.json({
+        success: true,
+        bookingId: booking.bookingId,
+        extraServices: booking.extraServices || [],
+        // Recomputed on read so legacy bookings (saved before this feature)
+        // still return a correct breakdown without a migration.
+        billing: computeBilling(booking)
+    });
 };
 
 // POST /:id/extra-services — add one extra service
 export const addExtraService = async (req, res) => {
-    try {
-        const { Booking, query, booking } = await loadBookingForBilling(req.params.id);
-        if (!booking) return res.status(404).json({ message: 'Booking not found' });
+    const { Booking, query, booking } = await requireBookingForBilling(req.params.id);
+    assertCanChangeExtras(booking, req);
 
-        const denied = denyExtraServiceChange(booking, req);
-        if (denied) return res.status(denied.code).json({ message: denied.message });
+    const line = normalizeExtraService(req.body);
+    if (!line.name) throw ApiError.badRequest('Service name is required.');
 
-        const line = normalizeExtraService(req.body);
-        if (!line.name) {
-            return res.status(400).json({ message: 'Service name is required.' });
-        }
-
-        // Guard against accidental double-addition (double-tap, client retry,
-        // a resubmitted form in a second tab). An identical line logged within
-        // the last 15s is treated as the same request, while a deliberate
-        // repeat of the same service later is still allowed through.
-        const now = Date.now();
-        const isRecentDuplicate = (booking.extraServices || []).some((e) => {
-            const addedAt = e?.addedAt ? new Date(e.addedAt).getTime() : 0;
-            return (
-                String(e?.name || '').trim().toLowerCase() === line.name.toLowerCase() &&
-                Number(e?.unitPrice) === line.unitPrice &&
-                Number(e?.quantity) === line.quantity &&
-                Number.isFinite(addedAt) &&
-                now - addedAt < DUPLICATE_EXTRA_WINDOW_MS
-            );
-        });
-        if (isRecentDuplicate) {
-            return res.status(409).json({
-                message: 'This extra service was just added. Refresh to see the current charges.'
-            });
-        }
-
-        const nextExtras = [
-            ...(booking.extraServices || []),
-            {
-                ...line,
-                addedBy: req.user?.id,
-                addedByRole: isAdminRequest(req) ? 'admin' : 'employee',
-                addedAt: new Date()
-            }
-        ];
-
-        const result = await saveExtras(Booking, query, booking, nextExtras);
-        res.status(201).json({ success: true, message: 'Extra service added', ...result });
-    } catch (err) {
-        res.status(400).json({ error: err.message });
+    // Guard against accidental double-addition (double-tap, client retry,
+    // a resubmitted form in a second tab). An identical line logged within
+    // the last 15s is treated as the same request, while a deliberate
+    // repeat of the same service later is still allowed through.
+    const now = Date.now();
+    const isRecentDuplicate = (booking.extraServices || []).some((e) => {
+        const addedAt = e?.addedAt ? new Date(e.addedAt).getTime() : 0;
+        return (
+            String(e?.name || '').trim().toLowerCase() === line.name.toLowerCase() &&
+            Number(e?.unitPrice) === line.unitPrice &&
+            Number(e?.quantity) === line.quantity &&
+            Number.isFinite(addedAt) &&
+            now - addedAt < DUPLICATE_EXTRA_WINDOW_MS
+        );
+    });
+    if (isRecentDuplicate) {
+        throw ApiError.conflict('This extra service was just added. Refresh to see the current charges.', { code: 'DUPLICATE_EXTRA_SERVICE' });
     }
+
+    const nextExtras = [
+        ...(booking.extraServices || []),
+        {
+            ...line,
+            addedBy: req.user?.id,
+            addedByRole: isAdminRequest(req) ? 'admin' : 'employee',
+            addedAt: new Date()
+        }
+    ];
+
+    const result = await saveExtras(Booking, query, booking, nextExtras);
+    res.status(201).json({ success: true, message: 'Extra service added', ...result });
 };
 
 // PUT /:id/extra-services/:extraId — edit an extra service
 export const updateExtraService = async (req, res) => {
-    try {
-        const { Booking, query, booking } = await loadBookingForBilling(req.params.id);
-        if (!booking) return res.status(404).json({ message: 'Booking not found' });
+    const { Booking, query, booking } = await requireBookingForBilling(req.params.id);
+    assertCanChangeExtras(booking, req);
 
-        const denied = denyExtraServiceChange(booking, req);
-        if (denied) return res.status(denied.code).json({ message: denied.message });
+    const { extraId } = req.params;
+    const current = (booking.extraServices || []).find((e) => String(e._id) === String(extraId));
+    if (!current) throw ApiError.notFound('Extra service not found');
 
-        const { extraId } = req.params;
-        const current = (booking.extraServices || []).find((e) => String(e._id) === String(extraId));
-        if (!current) return res.status(404).json({ message: 'Extra service not found' });
+    // Merge so callers can send a partial update.
+    const line = normalizeExtraService({
+        name: req.body.name ?? current.name,
+        quantity: req.body.quantity ?? current.quantity,
+        unitPrice: req.body.unitPrice ?? req.body.price ?? current.unitPrice,
+        notes: req.body.notes ?? current.notes
+    });
+    if (!line.name) throw ApiError.badRequest('Service name is required.');
 
-        // Merge so callers can send a partial update.
-        const line = normalizeExtraService({
-            name: req.body.name ?? current.name,
-            quantity: req.body.quantity ?? current.quantity,
-            unitPrice: req.body.unitPrice ?? req.body.price ?? current.unitPrice,
-            notes: req.body.notes ?? current.notes
-        });
-        if (!line.name) return res.status(400).json({ message: 'Service name is required.' });
+    const nextExtras = (booking.extraServices || []).map((e) =>
+        String(e._id) === String(extraId) ? { ...e, ...line } : e
+    );
 
-        const nextExtras = (booking.extraServices || []).map((e) =>
-            String(e._id) === String(extraId) ? { ...e, ...line } : e
-        );
-
-        const result = await saveExtras(Booking, query, booking, nextExtras);
-        res.json({ success: true, message: 'Extra service updated', ...result });
-    } catch (err) {
-        res.status(400).json({ error: err.message });
-    }
+    const result = await saveExtras(Booking, query, booking, nextExtras);
+    res.json({ success: true, message: 'Extra service updated', ...result });
 };
 
 // DELETE /:id/extra-services/:extraId — remove an extra service
 export const removeExtraService = async (req, res) => {
-    try {
-        const { Booking, query, booking } = await loadBookingForBilling(req.params.id);
-        if (!booking) return res.status(404).json({ message: 'Booking not found' });
+    const { Booking, query, booking } = await requireBookingForBilling(req.params.id);
+    assertCanChangeExtras(booking, req);
 
-        const denied = denyExtraServiceChange(booking, req);
-        if (denied) return res.status(denied.code).json({ message: denied.message });
-
-        const { extraId } = req.params;
-        const nextExtras = (booking.extraServices || []).filter(
-            (e) => String(e._id) !== String(extraId)
-        );
-        if (nextExtras.length === (booking.extraServices || []).length) {
-            return res.status(404).json({ message: 'Extra service not found' });
-        }
-
-        const result = await saveExtras(Booking, query, booking, nextExtras);
-        res.json({ success: true, message: 'Extra service removed', ...result });
-    } catch (err) {
-        res.status(400).json({ error: err.message });
+    const { extraId } = req.params;
+    const nextExtras = (booking.extraServices || []).filter(
+        (e) => String(e._id) !== String(extraId)
+    );
+    if (nextExtras.length === (booking.extraServices || []).length) {
+        throw ApiError.notFound('Extra service not found');
     }
+
+    const result = await saveExtras(Booking, query, booking, nextExtras);
+    res.json({ success: true, message: 'Extra service removed', ...result });
 };
 
 // Accept Assignment
 export const acceptAssignment = async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { default: Booking } = await import('../models/Booking.js');
-        const query = mongoose.Types.ObjectId.isValid(id) ? { _id: id } : { bookingId: id };
+    const { id } = req.params;
+    const { Booking, booking } = await loadBooking(id);
+    assertCanActOn(req, booking);
+    assertTransition(booking, 'accept');
 
-        // Takes the service fee (and checks the booking is assigned to this employee).
-        const fee = await chargeForStatusChange(req, id, 'ACCEPTED');
-        if (!fee.ok) return res.status(fee.status).json(fee.body);
+    // Takes the service fee (402 INSUFFICIENT_BALANCE / 409 FEE_CONFLICT).
+    const fee = await chargeForStatusChange(req, id, 'ACCEPTED');
+    if (!fee.ok) return sendFeeError(res, fee);
 
-        const booking = await Booking.findOneAndUpdate(
-            query,
-            { status: 'ACCEPTED' },
-            { new: true }
-        ).populate('userId').populate('assignedTo.technicianId');
+    const updated = await applyStatusUpdate(Booking, booking, { status: 'ACCEPTED' });
 
-        if (!booking) return res.status(404).json({ message: "Assignment not found" });
+    emitBookingUpdate(updated.bookingId, 'ACCEPTED', updated.toObject());
+    res.json({ message: "Assignment accepted", service: { ...updated.toObject(), id: updated._id } });
+};
 
-        emitBookingUpdate(booking.bookingId, 'ACCEPTED', booking.toObject());
-        res.json({ message: "Assignment accepted", service: { ...booking.toObject(), id: booking._id } });
-    } catch (err) {
-        res.status(400).json({ error: err.message });
+/** Legacy Service records belong to one employee (numeric empId); admins see all. */
+const assertOwnsLegacyService = (req, service) => {
+    if (isAdminRequest(req)) return;
+    if (!isEmployeeRequest(req) || Number(req.user.empId) !== Number(service.empId)) {
+        throw ApiError.forbidden('This service is not assigned to you.', { code: 'NOT_ASSIGNED' });
     }
 };
 
-// Reschedule
+// Reschedule (legacy numeric Service records)
 export const rescheduleService = async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { scheduledDate, time, notes } = req.body;
-        if (!scheduledDate || !time) return res.status(400).json({ message: "Date and time required" });
+    const { id } = req.params;
+    const { scheduledDate, time, notes } = req.body;
 
-        const service = await Service.findOneAndUpdate(
-            { serviceId: parseInt(id) },
-            { scheduledDate: new Date(scheduledDate), time: time, status: 'scheduled', updatedAt: new Date() },
-            { new: true }
-        );
-
-        if (!service) return res.status(404).json({ message: "Service not found" });
-
-        if (notes) {
-            const lastNote = await ServiceNote.findOne().sort({ noteId: -1 });
-            await ServiceNote.create({
-                noteId: lastNote ? lastNote.noteId + 1 : 6001,
-                serviceId: parseInt(id),
-                empId: service.empId,
-                note: `Rescheduled to ${new Date(scheduledDate).toLocaleDateString()}: ${notes}`,
-                type: 'general',
-                priority: 'medium',
-                createdBy: 'technician'
-            });
-        }
-
-        await Activity.create({
-            empId: service.empId,
-            type: 'service_scheduled',
-            message: `Rescheduled ${service.serviceType} for ${service.customer.name}`,
-            serviceId: service.serviceId
-        });
-
-        res.json({ message: "Rescheduled", service });
-    } catch (err) {
-        res.status(400).json({ error: err.message });
+    const existing = await Service.findOne({ serviceId: parseInt(id) }).select('empId status').lean();
+    if (!existing) throw ApiError.notFound('Service not found');
+    assertOwnsLegacyService(req, existing);
+    if (['completed', 'cancelled'].includes(String(existing.status).toLowerCase())) {
+        throw ApiError.conflict(`Cannot reschedule a service that is already ${String(existing.status).toLowerCase()}.`, { code: 'INVALID_STATUS_TRANSITION' });
     }
+
+    const service = await Service.findOneAndUpdate(
+        { serviceId: parseInt(id) },
+        { scheduledDate: new Date(scheduledDate), time: time, status: 'scheduled', updatedAt: new Date() },
+        { new: true }
+    );
+
+    if (!service) throw ApiError.notFound('Service not found');
+
+    if (notes) {
+        const lastNote = await ServiceNote.findOne().sort({ noteId: -1 });
+        await ServiceNote.create({
+            noteId: lastNote ? lastNote.noteId + 1 : 6001,
+            serviceId: parseInt(id),
+            empId: service.empId,
+            note: `Rescheduled to ${new Date(scheduledDate).toLocaleDateString()}: ${notes}`,
+            type: 'general',
+            priority: 'medium',
+            createdBy: 'technician'
+        });
+    }
+
+    await Activity.create({
+        empId: service.empId,
+        type: 'service_scheduled',
+        message: `Rescheduled ${service.serviceType} for ${service.customer?.name || 'Customer'}`,
+        serviceId: service.serviceId
+    });
+
+    res.json({ message: "Rescheduled", service });
 };
 
 // Helper to build full address containing area, city, state, country
@@ -614,7 +653,7 @@ const getFormattedLocation = (b) => {
 };
 
 // Fetch List Endpoints (Optimized)
-export const getAssigned = async (req, res) => {
+export const getAssigned = async (req, res, next) => {
     try {
         const { default: Booking } = await import('../models/Booking.js');
         const bookings = await Booking.find({
@@ -652,11 +691,11 @@ export const getAssigned = async (req, res) => {
             location: getFormattedLocation(b)
         })));
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 };
 
-export const getPending = async (req, res) => {
+export const getPending = async (req, res, next) => {
     try {
         const { default: Booking } = await import('../models/Booking.js');
         const bookings = await Booking.find({
@@ -690,11 +729,11 @@ export const getPending = async (req, res) => {
             location: getFormattedLocation(b)
         })));
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 };
 
-export const getCompleted = async (req, res) => {
+export const getCompleted = async (req, res, next) => {
     try {
         const { default: Booking } = await import('../models/Booking.js');
         const bookings = await Booking.find({
@@ -731,11 +770,11 @@ export const getCompleted = async (req, res) => {
             location: getFormattedLocation(b)
         })));
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 };
 
-export const getInProgress = async (req, res) => {
+export const getInProgress = async (req, res, next) => {
     try {
         const { default: Booking } = await import('../models/Booking.js');
         const employee = await Employee.findOne({ email: req.user.email }).select('empId').lean();
@@ -789,33 +828,35 @@ export const getInProgress = async (req, res) => {
 
         res.json([...mappedB, ...mappedS]);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 };
 
-export const getCustomerContact = async (req, res) => {
+export const getCustomerContact = async (req, res, next) => {
     try {
         const { id } = req.params;
-        const service = await Service.findOne({ serviceId: parseInt(id) }).select('customer serviceType').lean();
-        if (!service) return res.status(404).json({ message: "Service not found" });
+        const service = await Service.findOne({ serviceId: parseInt(id) }).select('customer serviceType empId').lean();
+        if (!service) throw ApiError.notFound("Service not found");
+        assertOwnsLegacyService(req, service);
         res.json({ customer: service.customer, serviceType: service.serviceType });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 };
 
-export const getServiceQuickActions = async (req, res) => {
+export const getServiceQuickActions = async (req, res, next) => {
     try {
         const { id } = req.params;
         const service = await Service.findOne({ serviceId: parseInt(id) }).select('serviceId serviceType status customer scheduledDate time duration estimatedEarnings empId').lean();
-        if (!service) return res.status(404).json({ message: "Service not found" });
+        if (!service) throw ApiError.notFound("Service not found");
+        assertOwnsLegacyService(req, service);
         res.json({
             id: service.serviceId, serviceId: service.serviceId, serviceType: service.serviceType,
-            status: service.status, customer: service.customer.name, customerPhone: service.customer.phone,
+            status: service.status, customer: service.customer?.name, customerPhone: service.customer?.phone,
             scheduledDate: service.scheduledDate, time: service.time, duration: service.duration,
-            estimatedEarnings: service.estimatedEarnings, address: service.customer.address
+            estimatedEarnings: service.estimatedEarnings, address: service.customer?.address
         });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        next(err);
     }
 };

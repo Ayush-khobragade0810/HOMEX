@@ -24,48 +24,9 @@ export const authSchemas = {
     })
 };
 
-// Booking Schemas
-export const bookingSchemas = {
-    createBooking: Joi.object({
-        serviceId: Joi.string().hex().length(24).optional(), // ObjectId
-        serviceDetails: Joi.object({
-            title: Joi.string().required(),
-            price: Joi.number().min(0).required(),
-            category: Joi.string().required(),
-            duration: Joi.number().optional()
-        }).required(),
-        schedule: Joi.object({
-            preferredDate: Joi.date().iso().required(), // Modified to allow today
-            timeSlot: Joi.string().required()
-        }).required(),
-        location: Joi.object({
-            country: Joi.string().optional(),
-            state: Joi.string().optional(),
-            city: Joi.string().optional(),
-            area: Joi.string().optional(),
-            completeAddress: Joi.string().required()
-        }).required(),
-        contactInfo: Joi.object({
-            fullName: Joi.string().required(),
-            phoneNumber: Joi.string().min(10).required(), // Relaxed validation
-            email: Joi.string().email().required()
-        }).required(),
-        payment: Joi.object({
-            method: Joi.string().valid('online', 'cash').required(),
-            amount: Joi.number().required()
-        }).required(),
-        notes: Joi.string().max(500).optional()
-    }),
-    updateStatus: Joi.object({
-        status: Joi.string().valid('PENDING', 'ACCEPTED', 'NAVIGATING', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED', 'pending', 'accepted', 'navigating', 'in_progress', 'completed', 'cancelled').required(),
-        notes: Joi.string().optional(),
-        cancellationReason: Joi.string().when('status', {
-            is: Joi.string().valid('CANCELLED', 'cancelled'),
-            then: Joi.required(),
-            otherwise: Joi.optional()
-        })
-    })
-};
+// Booking Schemas live in validators/booking.js; re-exported here so existing
+// imports of `bookingSchemas` from this file keep working.
+export { bookingSchemas } from '../validators/booking.js';
 
 // Extra Service Schemas (additional charges added during an appointment)
 const extraServiceLine = {

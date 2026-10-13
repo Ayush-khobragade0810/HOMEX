@@ -15,13 +15,15 @@ import {
     updateEmployeeSettings,
     deactivateAccount
 } from "../controllers/employeeController.js";
+import { validate } from "../middleware/validate.js";
+import * as s from "../validators/admin.js";
 
 const router = express.Router();
 
 // Base URL for this router is '/api/employees' (defined in server.js)
 
 // GET /api/employees
-router.get("/", searchEmployees);
+router.get("/", validate({ query: s.listEmployeesQuery }), searchEmployees);
 
 // Profile and Top Technicians (Employee specific)
 router.get("/profile", protect, getEmployeeProfile);
@@ -33,13 +35,14 @@ router.get("/availability", protect, getMyAvailability);
 router.put("/availability", protect, updateMyAvailability);
 
 // POST /api/employees
-router.post("/", createEmployee);
+router.post("/", validate({ body: s.createEmployee }), createEmployee);
 
 // PUT /api/employees/:id
-router.put("/:id", updateEmployeeProfile);
+// :id is the Mongo _id or the numeric empId.
+router.put("/:id", validate({ params: s.employeeIdParam, body: s.updateEmployee }), updateEmployeeProfile);
 
 // DELETE /api/employees/:id
-router.delete("/:id", deleteEmployee);
+router.delete("/:id", validate({ params: s.employeeIdParam }), deleteEmployee);
 
 // Settings Routes (Imported from employeeController)
 router.get("/:id/settings", protect, getEmployeeSettings);

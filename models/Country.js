@@ -2,7 +2,7 @@ import mongoose from "mongoose";
 
 const countrySchema = new mongoose.Schema({
     countryId: { type: Number, unique: true },
-    countryName: { type: String, required: true, unique: true }
+    countryName: { type: String, required: [true, "Country name is required"], unique: true }
 });
 
 // Auto-increment countryId

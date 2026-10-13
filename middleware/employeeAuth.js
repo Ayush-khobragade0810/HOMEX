@@ -4,7 +4,7 @@ import User from "../models/User.js";
 
 export const employeeAuth = async (req, res, next) => {
   if (!req.headers.authorization?.startsWith("Bearer ")) {
-    return res.status(401).json({ message: "No token provided" });
+    return res.status(401).json({ success: false, message: "Not authorized, no token provided", error: "Not authorized, no token provided", code: "NO_TOKEN" });
   }
 
   try {
@@ -13,12 +13,14 @@ export const employeeAuth = async (req, res, next) => {
 
     const employee = await User.findById(decoded.id).select("-password");
     if (!employee) {
-      return res.status(401).json({ message: "Employee not found" });
+      return res.status(401).json({ success: false, message: "Employee account not found", error: "Employee account not found", code: "ACCOUNT_NOT_FOUND" });
     }
 
     req.employee = employee;
     next();
   } catch (err) {
-    return res.status(401).json({ message: "Invalid token" });
+    const expired = err.name === "TokenExpiredError";
+    const message = expired ? "Your session has expired. Please log in again." : "Invalid authentication token";
+    return res.status(401).json({ success: false, message, error: message, code: expired ? "TOKEN_EXPIRED" : "INVALID_TOKEN" });
   }
 };

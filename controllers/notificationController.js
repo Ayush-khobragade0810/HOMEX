@@ -1,4 +1,5 @@
 import Notification from '../models/Notification.js';
+import { ApiError, sendError } from '../utils/ApiError.js';
 
 // Get all notifications for current user
 export const getNotifications = async (req, res) => {
@@ -18,10 +19,7 @@ export const getNotifications = async (req, res) => {
 
     } catch (error) {
         console.error('❌ Get notifications error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to fetch notifications'
-        });
+        sendError(res, 500, 'Failed to fetch notifications');
     }
 };
 
@@ -40,56 +38,53 @@ export const getUnreadCount = async (req, res) => {
 
     } catch (error) {
         console.error('❌ Get unread count error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to get unread count'
-        });
+        sendError(res, 500, 'Failed to get unread count');
     }
+};
+
+/**
+ * The caller's notification, or a 404 / 403. Ownership is checked BEFORE any
+ * change, so nobody can mark or delete another user's notifications.
+ */
+const findOwnNotification = async (req) => {
+    const notification = await Notification.findById(req.params.id).select('userId').lean();
+    if (!notification) throw ApiError.notFound('Notification not found');
+    if (String(notification.userId) !== String(req.user.id)) {
+        throw ApiError.forbidden('You can only manage your own notifications');
+    }
+    return notification;
 };
 
 // Mark notification as read
 export const markNotificationAsRead = async (req, res) => {
-    try {
-        const { id } = req.params;
+    await findOwnNotification(req);
 
-        const notification = await Notification.findByIdAndUpdate(
-            id,
-            {
-                isRead: true,
-                readAt: new Date(),
-                updatedAt: new Date()
-            },
-            { new: true }
-        );
+    const notification = await Notification.findOneAndUpdate(
+        { _id: req.params.id, userId: req.user.id },
+        {
+            isRead: true,
+            readAt: new Date(),
+            updatedAt: new Date()
+        },
+        { new: true }
+    );
+    if (!notification) throw ApiError.notFound('Notification not found');
 
-        if (!notification) {
-            return res.status(404).json({
-                success: false,
-                message: 'Notification not found'
-            });
-        }
+    res.json({
+        success: true,
+        message: 'Notification marked as read',
+        notification
+    });
+};
 
-        // Verify user owns this notification
-        if (notification.userId.toString() !== req.user.id.toString()) {
-            return res.status(403).json({
-                success: false,
-                message: 'Not authorized to modify this notification'
-            });
-        }
+// Delete a notification
+export const deleteNotification = async (req, res) => {
+    await findOwnNotification(req);
 
-        res.json({
-            success: true,
-            message: 'Notification marked as read',
-            notification
-        });
+    const result = await Notification.deleteOne({ _id: req.params.id, userId: req.user.id });
+    if (!result.deletedCount) throw ApiError.notFound('Notification not found');
 
-    } catch (error) {
-        console.error('❌ Mark as read error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to mark notification as read'
-        });
-    }
+    res.json({ success: true, message: 'Notification deleted' });
 };
 
 // Helper function to create notifications (for other controllers)
@@ -135,9 +130,6 @@ export const markAllNotificationsAsRead = async (req, res) => {
 
     } catch (error) {
         console.error('❌ Mark all read error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to mark all notifications as read'
-        });
+        sendError(res, 500, 'Failed to mark all notifications as read');
     }
 };

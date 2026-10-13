@@ -2,8 +2,8 @@ import mongoose from "mongoose";
 
 const stateSchema = new mongoose.Schema({
     stateId: { type: Number, unique: true },
-    stateName: { type: String, required: true },
-    countryId: { type: Number, required: true }
+    stateName: { type: String, required: [true, "State name is required"] },
+    countryId: { type: Number, required: [true, "Country is required"] }
 });
 
 // Auto-increment stateId

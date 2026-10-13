@@ -5,60 +5,58 @@ import { sendNotification, isUserOnline } from '../utils/helpers.js';
 import logger from '../utils/logger.js';
 import mongoose from 'mongoose';
 import { computeBilling } from '../utils/billing.js';
+import { ApiError } from '../utils/ApiError.js';
+
+// The signed-in account's User id. Employees authenticate with a plain object
+// that has `userId` (their User record) and `id` (their Employee record) but no `_id`.
+const ownId = (req) => String(req.user?._id || req.user?.userId || req.user?.id || '');
+
+// Resolves `req.params[name]` ("me" = the caller) to a validated ObjectId string.
+const resolveUserId = (req, name = 'id') => {
+    let userId = req.params[name];
+    if (userId === 'me') userId = ownId(req);
+    if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
+        throw ApiError.badRequest('Invalid user ID format', { code: 'INVALID_ID' });
+    }
+    return String(userId);
+};
+
+// Only the account owner or an admin may read or change a user's data.
+const assertOwnerOrAdmin = (req, userId, auditEvent, message, details = {}) => {
+    if (ownId(req) !== userId && req.user.role !== 'admin') {
+        logger.audit(auditEvent, req.user, { attemptedUserId: userId, ...details });
+        throw ApiError.forbidden(message);
+    }
+};
+
+// Unexpected failures are logged with context; the global handler formats the response.
+const fail = (next, error, context, label) => {
+    if (!error.isOperational) logger.errorWithContext(context, label, error);
+    return next(error);
+};
+
+const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// page/limit arrive as query strings; fall back to the defaults when absent.
+const toPositiveInt = (value, fallback) => {
+    const n = parseInt(value, 10);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+};
 
 // @desc    Get user profile (with authorization check)
 // @route   GET /api/user/profile/:id
 // @access  Private
-export const getUserProfile = async (req, res) => {
+export const getUserProfile = async (req, res, next) => {
     try {
-        let userId = req.params.id;
-
-        // Handle "me" alias
-        if (userId === 'me') {
-            if (req.user) {
-                userId = (req.user._id || req.user.id).toString();
-            } else {
-                return res.status(401).json({ success: false, message: 'Unauthorized: No user found' });
-            }
-        }
-
-        // Validate ObjectId
-        if (!mongoose.Types.ObjectId.isValid(userId)) {
-            return res.status(400).json({ success: false, message: 'Invalid user ID format' });
-        }
-
-        // Handle "me" alias
-        if (userId === 'me') {
-            if (req.user && req.user._id) {
-                userId = req.user._id.toString();
-            } else {
-                return res.status(401).json({ success: false, message: 'Unauthorized: No user found' });
-            }
-        }
-
-        // Validate ObjectId
-        if (!mongoose.Types.ObjectId.isValid(userId)) {
-            return res.status(400).json({ success: false, message: 'Invalid user ID format' });
-        }
-
-        // Authorization check
-        if (req.user._id.toString() !== userId && req.user.role !== 'admin') {
-            logger.audit('unauthorized_profile_access', req.user, { attemptedUserId: userId });
-            return res.status(403).json({
-                success: false,
-                message: 'Forbidden: You can only access your own profile'
-            });
-        }
+        const userId = resolveUserId(req);
+        assertOwnerOrAdmin(req, userId, 'unauthorized_profile_access', 'You can only access your own profile');
 
         const user = await User.findById(userId)
             .select('-password -__v -refreshTokens')
             .lean();
 
         if (!user) {
-            return res.status(404).json({
-                success: false,
-                message: 'User not found'
-            });
+            throw ApiError.notFound('User not found');
         }
 
         // Add online status
@@ -74,47 +72,65 @@ export const getUserProfile = async (req, res) => {
             user: userWithStatus
         });
     } catch (error) {
-        logger.errorWithContext(
-            { userId: req.params.id, user: req.user._id },
-            'Get user profile error',
-            error
-        );
-        res.status(500).json({
-            success: false,
-            message: 'Server error'
-        });
+        return fail(next, error, { userId: req.params.id, user: ownId(req) }, 'Get user profile error');
     }
 };
 
 // @desc    Update user profile (with authorization check)
 // @route   PUT /api/user/profile/:id
 // @access  Private
-export const updateUserProfile = async (req, res) => {
+export const updateUserProfile = async (req, res, next) => {
     try {
-        const userId = req.params.id;
-        const { name, email, phone, address, preferences } = req.body;
+        const userId = resolveUserId(req);
+        const { name, email, phone, address, preferences } = req.body || {};
 
-        // Authorization check
-        if (req.user._id.toString() !== userId && req.user.role !== 'admin') {
-            logger.audit('unauthorized_profile_update', req.user, { attemptedUserId: userId });
-            return res.status(403).json({
-                success: false,
-                message: 'Forbidden: You can only update your own profile'
-            });
-        }
+        assertOwnerOrAdmin(req, userId, 'unauthorized_profile_update', 'You can only update your own profile');
 
-        // Build update object
+        // Build update object (multipart bodies send blank fields as '')
         const updateData = {};
-        if (name) updateData.name = name;
-        if (email) updateData.email = email;
-        if (phone) updateData.phone = phone;
-        if (address) updateData.address = address;
-        if (preferences) updateData.preferences = preferences;
+        if (typeof name === 'string' && name.trim()) updateData.name = name.trim();
+        if (typeof email === 'string' && email.trim()) updateData.email = email.trim().toLowerCase();
+        if (typeof phone === 'string' && phone.trim()) updateData.phone = phone.trim();
+        // A form that echoes an address object back through FormData sends "[object Object]".
+        if (address && address !== '[object Object]') updateData.address = address;
+        if (preferences) {
+            if (typeof preferences === 'string') {
+                try {
+                    updateData.preferences = JSON.parse(preferences);
+                } catch {
+                    throw ApiError.badRequest('Preferences must be valid JSON', {
+                        errors: [{ field: 'preferences', message: 'Preferences must be valid JSON' }]
+                    });
+                }
+            } else {
+                updateData.preferences = preferences;
+            }
+        }
 
         // Handle file upload
         if (req.file) {
             // Store relative path
             updateData.avatar = `/uploads/profiles/${req.file.filename}`;
+        }
+
+        // Email and mobile number identify an account, so they must stay unique.
+        if (updateData.email) {
+            const taken = await User.exists({ email: updateData.email, _id: { $ne: userId } });
+            if (taken) {
+                throw ApiError.conflict('Email is already registered', {
+                    code: 'DUPLICATE',
+                    errors: [{ field: 'email', message: 'Email is already registered' }]
+                });
+            }
+        }
+        if (updateData.phone) {
+            const taken = await User.exists({ phone: updateData.phone, _id: { $ne: userId } });
+            if (taken) {
+                throw ApiError.conflict('Mobile number is already registered', {
+                    code: 'DUPLICATE',
+                    errors: [{ field: 'phone', message: 'Mobile number is already registered' }]
+                });
+            }
         }
 
         const user = await User.findByIdAndUpdate(
@@ -124,10 +140,7 @@ export const updateUserProfile = async (req, res) => {
         ).select('-password -__v -refreshTokens');
 
         if (!user) {
-            return res.status(404).json({
-                success: false,
-                message: 'User not found'
-            });
+            throw ApiError.notFound('User not found');
         }
 
         logger.audit('profile_update', req.user, `user:${userId}`, { updatedFields: Object.keys(updateData) });
@@ -138,63 +151,21 @@ export const updateUserProfile = async (req, res) => {
             user
         });
     } catch (error) {
-        logger.errorWithContext(
-            { userId: req.params.id, user: req.user._id },
-            'Update profile error',
-            error
-        );
-        res.status(500).json({
-            success: false,
-            message: 'Server error'
-        });
+        return fail(next, error, { userId: req.params.id, user: ownId(req) }, 'Update profile error');
     }
 };
 
 // @desc    Get user bookings (with authorization check)
 // @route   GET /api/my-bookings/user/:id
 // @access  Private
-export const getUserBookings = async (req, res) => {
+export const getUserBookings = async (req, res, next) => {
     try {
-        let userId = req.params.id;
+        const userId = resolveUserId(req);
+        assertOwnerOrAdmin(req, userId, 'unauthorized_bookings_access', 'You can only access your own bookings');
 
-        // Handle "me" alias
-        if (userId === 'me') {
-            if (req.user) {
-                userId = (req.user._id || req.user.id).toString();
-            } else {
-                return res.status(401).json({ success: false, message: 'Unauthorized: No user found' });
-            }
-        }
-
-        // Validate ObjectId
-        if (!mongoose.Types.ObjectId.isValid(userId)) {
-            return res.status(400).json({ success: false, message: 'Invalid user ID format' });
-        }
-
-        // Handle "me" alias
-        if (userId === 'me') {
-            if (req.user && req.user._id) {
-                userId = req.user._id.toString();
-            } else {
-                return res.status(401).json({ success: false, message: 'Unauthorized: No user found' });
-            }
-        }
-
-        // Validate ObjectId
-        if (!mongoose.Types.ObjectId.isValid(userId)) {
-            return res.status(400).json({ success: false, message: 'Invalid user ID format' });
-        }
-
-        // Authorization check
-        if (req.user._id.toString() !== userId && req.user.role !== 'admin') {
-            logger.audit('unauthorized_bookings_access', req.user, { attemptedUserId: userId });
-            return res.status(403).json({
-                success: false,
-                message: 'Forbidden: You can only access your own bookings'
-            });
-        }
-
-        const { status, page = 1, limit = 20, search } = req.query;
+        const { status, search } = req.query;
+        const page = toPositiveInt(req.query.page, 1);
+        const limit = toPositiveInt(req.query.limit, 20);
         const skip = (page - 1) * limit;
 
         let query = { userId: new mongoose.Types.ObjectId(userId) };
@@ -209,16 +180,17 @@ export const getUserBookings = async (req, res) => {
             } else if (status === 'past') {
                 query.status = { $in: ['completed', 'cancelled', 'rejected'] };
             } else {
-                query.status = status;
+                query.status = String(status);
             }
         }
 
-        // Apply search filter
+        // Apply search filter (escaped: user text is matched literally)
         if (search) {
+            const pattern = escapeRegex(search);
             query.$or = [
-                { bookingId: { $regex: search, $options: 'i' } },
-                { 'serviceDetails.title': { $regex: search, $options: 'i' } },
-                { 'serviceDetails.category': { $regex: search, $options: 'i' } }
+                { bookingId: { $regex: pattern, $options: 'i' } },
+                { 'serviceDetails.title': { $regex: pattern, $options: 'i' } },
+                { 'serviceDetails.category': { $regex: pattern, $options: 'i' } }
             ];
         }
 
@@ -227,7 +199,7 @@ export const getUserBookings = async (req, res) => {
             .populate('assignedTo.technicianId', 'name phone avatar rating')
             .sort({ 'schedule.preferredDate': 1, createdAt: -1 })
             .skip(skip)
-            .limit(parseInt(limit))
+            .limit(limit)
             .lean();
 
         const total = await Booking.countDocuments(query);
@@ -250,65 +222,21 @@ export const getUserBookings = async (req, res) => {
             count: bookings.length,
             total,
             pages: Math.ceil(total / limit),
-            currentPage: parseInt(page),
+            currentPage: page,
             data
         });
     } catch (error) {
-        logger.errorWithContext(
-            { userId: req.params.id, user: req.user._id },
-            'Get bookings error',
-            error
-        );
-        res.status(500).json({
-            success: false,
-            message: 'Server error'
-        });
+        return fail(next, error, { userId: req.params.id, user: ownId(req) }, 'Get bookings error');
     }
 };
 
 // @desc    Get user dashboard stats
 // @route   GET /api/user/:id/stats
 // @access  Private
-export const getDashboardStats = async (req, res) => {
+export const getDashboardStats = async (req, res, next) => {
     try {
-        let userId = req.params.id;
-
-        // Handle "me" alias
-        if (userId === 'me') {
-            if (req.user) {
-                userId = (req.user._id || req.user.id).toString();
-            } else {
-                return res.status(401).json({ success: false, message: 'Unauthorized: No user found' });
-            }
-        }
-
-        // Validate ObjectId
-        if (!mongoose.Types.ObjectId.isValid(userId)) {
-            return res.status(400).json({ success: false, message: 'Invalid user ID format' });
-        }
-
-        // Handle "me" alias
-        if (userId === 'me') {
-            if (req.user && req.user._id) {
-                userId = req.user._id.toString();
-            } else {
-                return res.status(401).json({ success: false, message: 'Unauthorized: No user found' });
-            }
-        }
-
-        // Validate ObjectId
-        if (!mongoose.Types.ObjectId.isValid(userId)) {
-            return res.status(400).json({ success: false, message: 'Invalid user ID format' });
-        }
-
-        // Authorization check
-        if (req.user._id.toString() !== userId && req.user.role !== 'admin') {
-            logger.audit('unauthorized_stats_access', req.user, { attemptedUserId: userId });
-            return res.status(403).json({
-                success: false,
-                message: 'Forbidden: You can only access your own stats'
-            });
-        }
+        const userId = resolveUserId(req);
+        assertOwnerOrAdmin(req, userId, 'unauthorized_stats_access', 'You can only access your own stats');
 
         const stats = await Booking.aggregate([
             { $match: { userId: new mongoose.Types.ObjectId(userId) } },
@@ -407,63 +335,21 @@ export const getDashboardStats = async (req, res) => {
 
         res.status(200).json(response);
     } catch (error) {
-        logger.errorWithContext(
-            { userId: req.params.id, user: req.user._id },
-            'Get dashboard stats error',
-            error
-        );
-        res.status(500).json({
-            success: false,
-            message: 'Server error'
-        });
+        return fail(next, error, { userId: req.params.id, user: ownId(req) }, 'Get dashboard stats error');
     }
 };
 
 // @desc    Get user notifications
 // @route   GET /api/user/:id/notifications
 // @access  Private
-export const getNotifications = async (req, res) => {
+export const getNotifications = async (req, res, next) => {
     try {
-        let userId = req.params.id;
+        const userId = resolveUserId(req);
+        assertOwnerOrAdmin(req, userId, 'unauthorized_notifications_access', 'You can only access your own notifications');
 
-        // Handle "me" alias
-        if (userId === 'me') {
-            if (req.user) {
-                userId = (req.user._id || req.user.id).toString();
-            } else {
-                return res.status(401).json({ success: false, message: 'Unauthorized: No user found' });
-            }
-        }
-
-        // Validate ObjectId
-        if (!mongoose.Types.ObjectId.isValid(userId)) {
-            return res.status(400).json({ success: false, message: 'Invalid user ID format' });
-        }
-
-        // Handle "me" alias
-        if (userId === 'me') {
-            if (req.user && req.user._id) {
-                userId = req.user._id.toString();
-            } else {
-                return res.status(401).json({ success: false, message: 'Unauthorized: No user found' });
-            }
-        }
-
-        // Validate ObjectId
-        if (!mongoose.Types.ObjectId.isValid(userId)) {
-            return res.status(400).json({ success: false, message: 'Invalid user ID format' });
-        }
-
-        // Authorization check
-        if (req.user._id.toString() !== userId && req.user.role !== 'admin') {
-            logger.audit('unauthorized_notifications_access', req.user, { attemptedUserId: userId });
-            return res.status(403).json({
-                success: false,
-                message: 'Forbidden: You can only access your own notifications'
-            });
-        }
-
-        const { unreadOnly = false, limit = 20, page = 1 } = req.query;
+        const { unreadOnly = false } = req.query;
+        const page = toPositiveInt(req.query.page, 1);
+        const limit = toPositiveInt(req.query.limit, 20);
         const skip = (page - 1) * limit;
 
         let query = { userId: new mongoose.Types.ObjectId(userId) };
@@ -474,7 +360,7 @@ export const getNotifications = async (req, res) => {
         const notifications = await Notification.find(query)
             .sort({ createdAt: -1 })
             .skip(skip)
-            .limit(parseInt(limit))
+            .limit(limit)
             .lean();
 
         const unreadCount = await Notification.countDocuments({
@@ -496,40 +382,28 @@ export const getNotifications = async (req, res) => {
             total,
             unreadCount,
             pages: Math.ceil(total / limit),
-            currentPage: parseInt(page),
+            currentPage: page,
             notifications
         });
     } catch (error) {
-        logger.errorWithContext(
-            { userId: req.params.id, user: req.user._id },
-            'Get notifications error',
-            error
-        );
-        res.status(500).json({
-            success: false,
-            message: 'Server error'
-        });
+        return fail(next, error, { userId: req.params.id, user: ownId(req) }, 'Get notifications error');
     }
 };
 
 // @desc    Mark notification as read
-// @route   PUT /api/user/:id/notifications/:notificationId/read
+// @route   PUT /api/user/:userId/notifications/:notificationId/read
 // @access  Private
-export const markNotificationAsRead = async (req, res) => {
+export const markNotificationAsRead = async (req, res, next) => {
     try {
-        const { userId, notificationId } = req.params;
+        const userId = resolveUserId(req, 'userId');
+        const { notificationId } = req.params;
 
-        // Authorization check
-        if (req.user._id.toString() !== userId && req.user.role !== 'admin') {
-            logger.audit('unauthorized_notification_mark', req.user, {
-                attemptedUserId: userId,
-                notificationId
-            });
-            return res.status(403).json({
-                success: false,
-                message: 'Forbidden'
-            });
+        if (!mongoose.Types.ObjectId.isValid(notificationId)) {
+            throw ApiError.badRequest('Invalid notification ID format', { code: 'INVALID_ID' });
         }
+
+        assertOwnerOrAdmin(req, userId, 'unauthorized_notification_mark',
+            'You can only update your own notifications', { notificationId });
 
         const notification = await Notification.findOneAndUpdate(
             {
@@ -541,10 +415,7 @@ export const markNotificationAsRead = async (req, res) => {
         );
 
         if (!notification) {
-            return res.status(404).json({
-                success: false,
-                message: 'Notification not found'
-            });
+            throw ApiError.notFound('Notification not found');
         }
 
         logger.audit('notification_mark_read', req.user, `notification:${notificationId}`, {
@@ -558,33 +429,19 @@ export const markNotificationAsRead = async (req, res) => {
             notification
         });
     } catch (error) {
-        logger.errorWithContext(
+        return fail(next, error,
             { userId: req.params.userId, notificationId: req.params.notificationId },
-            'Mark notification read error',
-            error
-        );
-        res.status(500).json({
-            success: false,
-            message: 'Server error'
-        });
+            'Mark notification read error');
     }
 };
 
 // @desc    Mark all notifications as read
 // @route   PUT /api/user/:id/notifications/read-all
 // @access  Private
-export const markAllNotificationsAsRead = async (req, res) => {
+export const markAllNotificationsAsRead = async (req, res, next) => {
     try {
-        const userId = req.params.id;
-
-        // Authorization check
-        if (req.user._id.toString() !== userId && req.user.role !== 'admin') {
-            logger.audit('unauthorized_notifications_mark_all', req.user, { attemptedUserId: userId });
-            return res.status(403).json({
-                success: false,
-                message: 'Forbidden'
-            });
-        }
+        const userId = resolveUserId(req);
+        assertOwnerOrAdmin(req, userId, 'unauthorized_notifications_mark_all', 'You can only update your own notifications');
 
         const result = await Notification.updateMany(
             {
@@ -607,14 +464,6 @@ export const markAllNotificationsAsRead = async (req, res) => {
             modifiedCount: result.modifiedCount
         });
     } catch (error) {
-        logger.errorWithContext(
-            { userId: req.params.id, user: req.user._id },
-            'Mark all notifications read error',
-            error
-        );
-        res.status(500).json({
-            success: false,
-            message: 'Server error'
-        });
+        return fail(next, error, { userId: req.params.id, user: ownId(req) }, 'Mark all notifications read error');
     }
 };

@@ -10,7 +10,7 @@ import { computeBilling } from '../utils/billing.js';
  * DASHBOARD STATS
  * =============================
  */
-export const getDashboardStats = async (req, res) => {
+export const getDashboardStats = async (req, res, next) => {
   try {
     const cacheKey = 'admin_dashboard_stats';
     const cachedStats = cache.get(cacheKey);
@@ -116,15 +116,7 @@ export const getDashboardStats = async (req, res) => {
       ...stats
     });
   } catch (err) {
-    console.error('❌ ADMIN STATS ERROR (getDashboardStats):', {
-      message: err.message,
-      stack: err.stack
-    });
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to fetch dashboard statistics',
-      error: process.env.NODE_ENV === 'development' ? err.message : undefined
-    });
+    next(err);
   }
 };
 
@@ -267,7 +259,7 @@ export const getRecentBookings = async (req, res) => {
  * @route   GET /api/admin/users
  * @access  Private/Admin
  */
-export const getAllUsers = async (req, res) => {
+export const getAllUsers = async (req, res, next) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
@@ -337,16 +329,7 @@ export const getAllUsers = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('❌ GET USERS ERROR (getAllUsers):', {
-      message: error.message,
-      stack: error.stack,
-      query: req.query
-    });
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to fetch users',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    next(error);
   }
 };
 
@@ -355,7 +338,7 @@ export const getAllUsers = async (req, res) => {
  * @route   GET /api/admin/user-stats
  * @access  Private/Admin
  */
-export const getUserStats = async (req, res) => {
+export const getUserStats = async (req, res, next) => {
   try {
     const cacheKey = 'admin_user_stats';
     const cachedStats = cache.get(cacheKey);
@@ -401,15 +384,7 @@ export const getUserStats = async (req, res) => {
       stats
     });
   } catch (error) {
-    console.error('❌ USER STATS ERROR (getUserStats):', {
-      message: error.message,
-      stack: error.stack
-    });
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to fetch user stats',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    next(error);
   }
 };
 
@@ -418,7 +393,7 @@ export const getUserStats = async (req, res) => {
  * @route   GET /api/admin/debug-users
  * @access  Private/Admin
  */
-export const debugUsers = async (req, res) => {
+export const debugUsers = async (req, res, next) => {
   try {
     const allUsers = await User.find({}).limit(100).lean();
     
@@ -436,7 +411,6 @@ export const debugUsers = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Debug error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    next(error);
   }
 };

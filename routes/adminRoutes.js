@@ -10,28 +10,18 @@ import { canReceiveJobs, SUBSCRIPTION_ASSIGN_ERROR } from '../middleware/subscri
 import { refundOnReassign } from '../services/serviceFeeService.js';
 import { availabilityBlockReason } from '../utils/availability.js';
 import { getDashboardStats, getUserStats, getAllUsers } from '../controllers/adminController.js';
+import { validate, validateObjectId } from '../middleware/validate.js';
+import { ApiError } from '../utils/ApiError.js';
+import * as s from '../validators/admin.js';
 
 const router = express.Router();
-
-const validateObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
 
 const sanitizeInput = (input) => {
   if (typeof input === 'string') return input.trim();
   return input;
 };
 
-const validateEmail = (email) => {
-  return String(email)
-    .toLowerCase()
-    .match(
-      /^(([^<>()[\]\\.,;:\s@"]+(\.[^<>()[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/
-    );
-};
-
-const validatePhone = (phone) => {
-  // Accepts 10-digit numbers, with optional country code (+91)
-  return /^(\+91[\-\s]?)?[0]?(91)?[6789]\d{9}$/.test(phone) || /^\d{10}$/.test(phone);
-};
+const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 
 // Re-exporting legacy handler if strictly needed by other routes not shown here, 
@@ -80,33 +70,23 @@ router.get("/user-stats", authenticateAdmin, getUserStats);
  * @route   GET /api/admin/users
  * @access  Private/Admin
  */
-router.get("/users", authenticateAdmin, getAllUsers);
+router.get("/users", authenticateAdmin, validate({ query: s.listUsersQuery }), getAllUsers);
 
 /**
  * @desc    Get user by ID with details
  * @route   GET /api/admin/users/:id
  * @access  Private/Admin
  */
-router.get("/users/:id", authenticateAdmin, async (req, res) => {
+router.get("/users/:id", authenticateAdmin, validateObjectId('id'), async (req, res, next) => {
   try {
     const userId = sanitizeInput(req.params.id);
-
-    if (!validateObjectId(userId)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid user ID format'
-      });
-    }
 
     const user = await User.findById(userId)
       .select("-password")
       .lean();
 
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        error: "User not found"
-      });
+      throw ApiError.notFound("User not found");
     }
 
     // Get user's bookings
@@ -140,11 +120,7 @@ router.get("/users/:id", authenticateAdmin, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error("User Fetch Error:", error);
-    res.status(500).json({
-      success: false,
-      error: "Failed to load user"
-    });
+    next(error);
   }
 });
 
@@ -153,16 +129,9 @@ router.get("/users/:id", authenticateAdmin, async (req, res) => {
  * @route   PUT /api/admin/users/:id
  * @access  Private/Admin
  */
-router.put("/users/:id", authenticateAdmin, async (req, res) => {
+router.put("/users/:id", authenticateAdmin, validateObjectId('id'), validate({ body: s.updateUser }), async (req, res, next) => {
   try {
     const userId = sanitizeInput(req.params.id);
-
-    if (!validateObjectId(userId)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid user ID format'
-      });
-    }
 
     const allowedUpdates = [
       'name',
@@ -176,18 +145,22 @@ router.put("/users/:id", authenticateAdmin, async (req, res) => {
 
     const updateData = {};
 
-    Object.keys(req.body).forEach(key => {
+    // Formats are checked by validate({ body: s.updateUser }) above.
+    Object.keys(req.body || {}).forEach(key => {
       if (allowedUpdates.includes(key)) {
-        // Validate email and phone if provided
-        if (key === 'email' && req.body.email && !validateEmail(req.body.email)) {
-          throw new Error('Invalid email format');
-        }
-        if (key === 'phone' && req.body.phone && !validatePhone(req.body.phone)) {
-          throw new Error('Invalid phone number format');
-        }
         updateData[key] = sanitizeInput(req.body[key]);
       }
     });
+
+    if (updateData.email) {
+      const emailTaken = await User.exists({
+        email: String(updateData.email).toLowerCase(),
+        _id: { $ne: userId }
+      });
+      if (emailTaken) {
+        throw ApiError.conflict("Email is already registered to another user");
+      }
+    }
 
     const updatedUser = await User.findByIdAndUpdate(
       userId,
@@ -196,10 +169,7 @@ router.put("/users/:id", authenticateAdmin, async (req, res) => {
     ).select("-password");
 
     if (!updatedUser) {
-      return res.status(404).json({
-        success: false,
-        error: "User not found"
-      });
+      throw ApiError.notFound("User not found");
     }
 
     res.json({
@@ -209,11 +179,7 @@ router.put("/users/:id", authenticateAdmin, async (req, res) => {
     });
 
   } catch (error) {
-    console.error("Update User Error:", error);
-    res.status(500).json({
-      success: false,
-      error: error.message || "Failed to update user"
-    });
+    next(error);
   }
 });
 
@@ -222,24 +188,10 @@ router.put("/users/:id", authenticateAdmin, async (req, res) => {
  * @route   PUT /api/admin/users/:id/status
  * @access  Private/Admin
  */
-router.put("/users/:id/status", authenticateAdmin, async (req, res) => {
+router.put("/users/:id/status", authenticateAdmin, validateObjectId('id'), validate({ body: s.updateUserStatus }), async (req, res, next) => {
   try {
     const userId = sanitizeInput(req.params.id);
     const { isActive } = req.body;
-
-    if (!validateObjectId(userId)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid user ID format'
-      });
-    }
-
-    if (typeof isActive !== 'boolean') {
-      return res.status(400).json({
-        success: false,
-        error: "isActive must be a boolean"
-      });
-    }
 
     const updatedUser = await User.findByIdAndUpdate(
       userId,
@@ -248,10 +200,7 @@ router.put("/users/:id/status", authenticateAdmin, async (req, res) => {
     ).select("-password");
 
     if (!updatedUser) {
-      return res.status(404).json({
-        success: false,
-        error: "User not found"
-      });
+      throw ApiError.notFound("User not found");
     }
 
     res.json({
@@ -260,11 +209,7 @@ router.put("/users/:id/status", authenticateAdmin, async (req, res) => {
       user: updatedUser
     });
   } catch (error) {
-    console.error("Update User Status Error:", error);
-    res.status(500).json({
-      success: false,
-      error: "Failed to update user status"
-    });
+    next(error);
   }
 });
 
@@ -273,37 +218,27 @@ router.put("/users/:id/status", authenticateAdmin, async (req, res) => {
  * @route   DELETE /api/admin/users/:id
  * @access  Private/Admin
  */
-router.delete("/users/:id", authenticateAdmin, async (req, res) => {
+router.delete("/users/:id", authenticateAdmin, validateObjectId('id'), async (req, res, next) => {
   try {
     const userId = sanitizeInput(req.params.id);
-
-    if (!validateObjectId(userId)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid user ID format'
-      });
-    }
 
     const user = await User.findById(userId);
 
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        error: "User not found"
-      });
+      throw ApiError.notFound("User not found");
     }
 
-    // Check if user has bookings
+    // Check if user has bookings (Booking stores the owner in `userId`;
+    // there is no `customer` field, so the old filter never matched).
     const userBookings = await Booking.countDocuments({
-      customer: user._id
+      userId: user._id
     });
 
     if (userBookings > 0) {
-      return res.status(400).json({
-        success: false,
-        error: "Cannot delete user with existing bookings",
-        bookingCount: userBookings
-      });
+      throw ApiError.conflict(
+        `Cannot delete this user because they have ${userBookings} booking${userBookings === 1 ? '' : 's'}. Deactivate the account instead.`,
+        { code: 'USER_HAS_BOOKINGS', details: { bookingCount: userBookings } }
+      );
     }
 
     await User.findByIdAndDelete(userId);
@@ -313,11 +248,7 @@ router.delete("/users/:id", authenticateAdmin, async (req, res) => {
       message: "User deleted successfully",
     });
   } catch (error) {
-    console.error("Delete User Error:", error);
-    res.status(500).json({
-      success: false,
-      error: "Failed to delete user"
-    });
+    next(error);
   }
 });
 
@@ -330,7 +261,7 @@ router.delete("/users/:id", authenticateAdmin, async (req, res) => {
  * @route   GET /api/admin/search
  * @access  Private/Admin
  */
-router.get("/search", authenticateAdmin, async (req, res) => {
+router.get("/search", authenticateAdmin, validate({ query: s.searchQuery }), async (req, res, next) => {
   try {
     const { query } = req.query;
     const sanitizedQuery = sanitizeInput(query || '');
@@ -346,7 +277,8 @@ router.get("/search", authenticateAdmin, async (req, res) => {
       });
     }
 
-    const searchRegex = { $regex: sanitizedQuery, $options: 'i' };
+    // Escaped so user input is matched literally (no regex injection / invalid patterns).
+    const searchRegex = { $regex: escapeRegex(sanitizedQuery), $options: 'i' };
 
     // Search users
     const users = await User.find({
@@ -399,11 +331,7 @@ router.get("/search", authenticateAdmin, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error("Search Error:", error);
-    res.status(500).json({
-      success: false,
-      error: "Search failed"
-    });
+    next(error);
   }
 });
 
@@ -412,7 +340,7 @@ router.get("/search", authenticateAdmin, async (req, res) => {
  * @route   GET /api/admin/feedback
  * @access  Private/Admin
  */
-router.get("/feedback", authenticateAdmin, async (req, res) => {
+router.get("/feedback", authenticateAdmin, validate({ query: s.feedbackQuery }), async (req, res, next) => {
   try {
     const { limit = 10, page = 1 } = req.query;
     const skip = (parseInt(page) - 1) * parseInt(limit);
@@ -467,11 +395,7 @@ router.get("/feedback", authenticateAdmin, async (req, res) => {
       totalPages: Math.ceil(totalFeedbacks / parseInt(limit)),
     });
   } catch (error) {
-    console.error("Feedback Error:", error);
-    res.status(500).json({
-      success: false,
-      error: "Failed to load feedback"
-    });
+    next(error);
   }
 });
 
@@ -484,7 +408,7 @@ router.get("/feedback", authenticateAdmin, async (req, res) => {
  * @route   GET /api/admin/activities
  * @access  Private/Admin
  */
-router.get("/activities", authenticateAdmin, async (req, res) => {
+router.get("/activities", authenticateAdmin, validate({ query: s.activitiesQuery }), async (req, res, next) => {
   try {
     const { limit = 20 } = req.query;
 
@@ -533,11 +457,7 @@ router.get("/activities", authenticateAdmin, async (req, res) => {
       total: activities.length
     });
   } catch (error) {
-    console.error("Activities Error:", error);
-    res.status(500).json({
-      success: false,
-      error: "Failed to load activities"
-    });
+    next(error);
   }
 });
 
@@ -550,9 +470,9 @@ router.get("/activities", authenticateAdmin, async (req, res) => {
  * @route   GET /api/admin/analytics
  * @access  Private/Admin
  */
-router.get("/analytics", authenticateAdmin, async (req, res) => {
+router.get("/analytics", authenticateAdmin, validate({ query: s.analyticsQuery }), async (req, res, next) => {
   try {
-    const { period = 'month' } = req.query;
+    const period = String(req.query.period || 'month').trim().toLowerCase();
     let startDate, endDate;
 
     const now = new Date();
@@ -680,11 +600,7 @@ router.get("/analytics", authenticateAdmin, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error fetching booking analytics:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch booking analytics'
-    });
+    next(error);
   }
 });
 
@@ -700,54 +616,26 @@ router.get("/analytics", authenticateAdmin, async (req, res) => {
 // ======================================
 // ASSIGN BOOKING HANDLER (Step 3 & 4 Fixes)
 // ======================================
-const assignBookingHandler = async (req, res) => {
+const assignBookingHandler = async (req, res, next) => {
   try {
-    const { bookingId } = req.params;
-    const { employeeId } = req.body;
-
-    if (!bookingId || !employeeId) {
-      console.error("❌ Missing required fields:", { bookingId, employeeId });
-      return res.status(400).json({
-        success: false,
-        error: "Booking ID or Employee ID missing"
-      });
-    }
+    // Shape is checked by validate({ params, body }) on the route.
+    const bookingId = String(req.params.bookingId).trim();
+    const employeeId = String(req.body.employeeId).trim();
 
     // 1. Find Booking (Handle both ObjectId and String ID)
-    let booking;
-    try {
-      if (mongoose.Types.ObjectId.isValid(bookingId)) {
-        booking = await Booking.findById(bookingId);
-      } else {
-        booking = await Booking.findOne({ bookingId: bookingId });
-      }
-    } catch (err) {
-      console.error("❌ Error finding booking:", err);
-      return res.status(500).json({ success: false, error: "Database error finding booking" });
-    }
+    const booking = mongoose.Types.ObjectId.isValid(bookingId)
+      ? await Booking.findById(bookingId)
+      : await Booking.findOne({ bookingId: bookingId });
 
     if (!booking) {
-      console.error("❌ Booking not found:", bookingId);
-      return res.status(404).json({ success: false, error: "Booking not found" });
+      throw ApiError.notFound("Booking not found");
     }
 
     // 2. Find Employee
-    if (!mongoose.Types.ObjectId.isValid(employeeId)) {
-      console.error("❌ Invalid Employee ID format:", employeeId);
-      return res.status(400).json({ success: false, error: "Invalid Employee ID format" });
-    }
-
-    let employee;
-    try {
-      employee = await Employee.findById(employeeId);
-    } catch (err) {
-      console.error("❌ Error finding employee:", err);
-      return res.status(500).json({ success: false, error: "Database error finding employee" });
-    }
+    const employee = await Employee.findById(employeeId);
 
     if (!employee) {
-      console.error("❌ Employee not found:", employeeId);
-      return res.status(404).json({ success: false, error: "Employee not found" });
+      throw ApiError.notFound("Employee not found");
     }
 
     if (!(await canReceiveJobs(employee))) {
@@ -761,9 +649,11 @@ const assignBookingHandler = async (req, res) => {
 
     // Check if employee is active
     if (employee.status !== 'Active') {
+      const message = "Cannot assign booking to inactive employee";
       return res.status(400).json({
         success: false,
-        error: "Cannot assign booking to inactive employee",
+        message,
+        error: message,
         employeeStatus: employee.status
       });
     }
@@ -795,12 +685,8 @@ const assignBookingHandler = async (req, res) => {
       timestamp: new Date()
     });
 
-    try {
-      await booking.save();
-    } catch (saveError) {
-      console.error("❌ Error saving booking:", saveError);
-      return res.status(500).json({ success: false, error: "Failed to save booking assignment", details: saveError.message });
-    }
+    // Validation/cast failures surface as 400 via the global error handler.
+    await booking.save();
 
     // 4. Create Service and Notification (safely)
     try {
@@ -878,12 +764,13 @@ const assignBookingHandler = async (req, res) => {
     });
 
   } catch (error) {
-    console.error("❌ Assign Booking Unhandled Error:", error);
-    res.status(500).json({ success: false, error: error.message, stack: error.stack });
+    next(error);
   }
 };
 
-router.post("/bookings/:bookingId/assign", authenticateAdmin, assignBookingHandler);
-router.put("/bookings/:bookingId/assign", authenticateAdmin, assignBookingHandler);
+const validateAssign = validate({ params: s.assignBookingParams, body: s.assignBookingBody });
+
+router.post("/bookings/:bookingId/assign", authenticateAdmin, validateAssign, assignBookingHandler);
+router.put("/bookings/:bookingId/assign", authenticateAdmin, validateAssign, assignBookingHandler);
 
 export default router;

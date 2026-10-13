@@ -1,6 +1,11 @@
 import jwt from 'jsonwebtoken';
 import Employee from '../models/adminEmployee.js';
 
+// 401 means "log in again" to the frontend (it clears the session), so it is
+// only used when the caller's credentials are missing or invalid.
+const unauthorized = (res, message, code) =>
+  res.status(401).json({ success: false, message, error: message, ...(code && { code }) });
+
 export const protect = async (req, res, next) => {
   try {
     let token;
@@ -13,7 +18,7 @@ export const protect = async (req, res, next) => {
     }
 
     if (!token) {
-      return res.status(401).json({ message: 'Not authorized, no token' });
+      return unauthorized(res, 'Not authorized, no token provided', 'NO_TOKEN');
     }
 
     // Verify token
@@ -97,7 +102,7 @@ export const protect = async (req, res, next) => {
     }
 
     if (!employee) {
-      return res.status(401).json({ message: 'User or Employee profile not found' });
+      return unauthorized(res, 'Your account could not be found. Please log in again.', 'ACCOUNT_NOT_FOUND');
     }
 
     // Attach employee to request
@@ -114,25 +119,33 @@ export const protect = async (req, res, next) => {
   } catch (error) {
     console.error('Auth error:', error.message);
 
-    if (error.name === 'JsonWebTokenError') {
-      return res.status(401).json({ message: 'Invalid token' });
-    }
-
     if (error.name === 'TokenExpiredError') {
-      return res.status(401).json({ message: 'Token expired' });
+      return unauthorized(res, 'Your session has expired. Please log in again.', 'TOKEN_EXPIRED');
     }
 
-    return res.status(401).json({ message: 'Not authorized' });
+    // A malformed token, or one whose id is not a valid ObjectId.
+    if (error.name === 'JsonWebTokenError' || error.name === 'NotBeforeError' || error.name === 'CastError') {
+      return unauthorized(res, 'Invalid authentication token', 'INVALID_TOKEN');
+    }
+
+    // Anything else (e.g. the database being unreachable) is a server fault,
+    // not a reason to log the user out.
+    return res.status(500).json({
+      success: false,
+      message: 'Could not verify your session. Please try again.',
+      error: 'Could not verify your session. Please try again.'
+    });
   }
 };
 
 export const authorize = (...roles) => {
   return (req, res, next) => {
     if (!req.user) {
-      return res.status(401).json({ message: "Not authorized" });
+      return unauthorized(res, 'Not authorized, please log in');
     }
     if (!roles.includes(req.user.role)) {
-      return res.status(403).json({ message: `User role ${req.user.role} is not authorized` });
+      const message = `Access denied: this action requires ${roles.join(' or ')} role`;
+      return res.status(403).json({ success: false, message, error: message, code: 'FORBIDDEN' });
     }
     next();
   };
@@ -149,10 +162,7 @@ export const adminAuth = async (req, res, next) => {
       : null);
 
   if (!token) {
-    return res.status(401).json({
-      success: false,
-      message: 'No admin token, authorization denied'
-    });
+    return unauthorized(res, 'No admin token, authorization denied', 'NO_TOKEN');
   }
 
   // 1. Static token validation (Legacy/Internal)
@@ -173,7 +183,9 @@ export const adminAuth = async (req, res, next) => {
     if (userRole !== 'admin') {
       return res.status(403).json({
         success: false,
-        message: 'Access denied: Admin role required'
+        message: 'Access denied: Admin role required',
+        error: 'Access denied: Admin role required',
+        code: 'FORBIDDEN'
       });
     }
 
@@ -182,10 +194,9 @@ export const adminAuth = async (req, res, next) => {
     next();
   } catch (err) {
     console.error("Admin Auth Error:", err.message);
-    return res.status(401).json({
-      success: false,
-      message: 'Invalid or expired token'
-    });
+    return err.name === 'TokenExpiredError'
+      ? unauthorized(res, 'Your session has expired. Please log in again.', 'TOKEN_EXPIRED')
+      : unauthorized(res, 'Invalid authentication token', 'INVALID_TOKEN');
   }
 };
 

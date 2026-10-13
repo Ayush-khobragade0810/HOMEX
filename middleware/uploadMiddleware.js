@@ -1,6 +1,7 @@
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
+import { ApiError } from '../utils/ApiError.js';
 
 // Ensure upload directory exists
 const uploadDir = 'uploads/profiles/';
@@ -26,7 +27,7 @@ const fileFilter = (req, file, cb) => {
     if (file.mimetype.startsWith('image/')) {
         cb(null, true);
     } else {
-        cb(new Error('Not an image! Please upload an image.'), false);
+        cb(ApiError.badRequest('Only image files are allowed (JPG, PNG, GIF or WEBP)', { code: 'INVALID_FILE_TYPE' }), false);
     }
 };
 

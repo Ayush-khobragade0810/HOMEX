@@ -16,6 +16,55 @@ import {
 } from '../utils/helpers.js';
 import logger from '../utils/logger.js';
 import socketService from '../socket/socketService.js';
+import { ApiError } from '../utils/ApiError.js';
+
+const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const requesterId = (req) => String(req.user?.userId || req.user?._id || req.user?.id || '');
+
+// A slot holds at most this many active bookings (shared by available-slots,
+// create and reschedule so the three always agree).
+const MAX_PER_SLOT = 5;
+// Bookings that occupy their slot. Both casings exist in the DB.
+const SLOT_OCCUPYING_STATUSES = [
+  'confirmed', 'assigned', 'in_progress',
+  'CONFIRMED', 'ACCEPTED', 'ASSIGNED', 'NAVIGATING', 'IN_PROGRESS'
+];
+
+const dayBounds = (date) => {
+  const startOfDay = new Date(date);
+  startOfDay.setHours(0, 0, 0, 0);
+  const endOfDay = new Date(date);
+  endOfDay.setHours(23, 59, 59, 999);
+  return { startOfDay, endOfDay };
+};
+
+const countBookingsInSlot = async (date, timeSlot, excludeId) => {
+  const { startOfDay, endOfDay } = dayBounds(date);
+  const query = {
+    'schedule.preferredDate': { $gte: startOfDay, $lte: endOfDay },
+    'schedule.timeSlot': timeSlot,
+    status: { $in: SLOT_OCCUPYING_STATUSES }
+  };
+  if (excludeId) query._id = { $ne: excludeId };
+  return Booking.countDocuments(query);
+};
+
+// Turns a failed validateTimeSlot() result into the right HTTP error.
+const slotError = (slotValidation) => {
+  const reason = slotValidation.reason || 'Invalid time slot';
+  if (/past/i.test(reason)) {
+    return ApiError.badRequest('The selected date and time slot is in the past. Please choose a later slot.');
+  }
+  if (/already has a booking/i.test(reason)) return ApiError.conflict(reason);
+  return ApiError.badRequest(`Invalid time slot: ${reason}`);
+};
+
+const assertSlotHasRoom = async (date, timeSlot, excludeId) => {
+  if ((await countBookingsInSlot(date, timeSlot, excludeId)) >= MAX_PER_SLOT) {
+    throw ApiError.conflict('This time slot is fully booked. Please choose another slot.', { code: 'SLOT_UNAVAILABLE' });
+  }
+};
 
 const parseClockToMinutes = (value) => {
   if (!value) return null;
@@ -78,14 +127,15 @@ export const createBooking = async (req, res) => {
     // Validate inputs
     // We allow serviceId to be missing if serviceDetails are fully provided (for custom/temp services)
     if ((!serviceId && !serviceDetails) || !schedule || !location || !payment) {
-      throw new Error('Missing required booking information');
+      throw ApiError.badRequest('Missing required booking information (service, schedule, location and payment are required)');
     }
 
-    // Validate time slot
+    // Validate time slot: in the past -> 400, slot full -> 409
     const slotValidation = await validateTimeSlot(schedule.preferredDate, schedule.timeSlot);
     if (!slotValidation.valid) {
-      throw new Error(`Invalid time slot: ${slotValidation.reason}`);
+      throw slotError(slotValidation);
     }
+    await assertSlotHasRoom(schedule.preferredDate, schedule.timeSlot);
     const durationFromTimeSlot = calculateDurationFromTimeSlot(schedule.timeSlot);
 
     // Validate location by Area ID or manual name (Production-Level Fix)
@@ -97,7 +147,7 @@ export const createBooking = async (req, res) => {
     const city = (location && location.city) || req.body.city;
 
     if (!targetAreaId && !manualAreaName) {
-      throw new Error("Area is required. Please select a valid location from the list or enter manually.");
+      throw ApiError.badRequest("Area is required. Please select a valid location from the list or enter manually.");
     }
 
     // Check if Area exists by ID
@@ -112,10 +162,11 @@ export const createBooking = async (req, res) => {
     // Handle manual area entry if ID not found/provided
     if (!areaDoc && manualAreaName && country && state && city) {
       areaDoc = await Area.findOne({
-        areaName: { $regex: new RegExp(`^${manualAreaName.trim()}$`, 'i') },
-        city: { $regex: new RegExp(`^${city.trim()}$`, 'i') },
-        state: { $regex: new RegExp(`^${state.trim()}$`, 'i') },
-        country: { $regex: new RegExp(`^${country.trim()}$`, 'i') }
+        // Escaped: names like "Sector (5)" are literal text, not regex syntax.
+        areaName: { $regex: new RegExp(`^${escapeRegex(manualAreaName.trim())}$`, 'i') },
+        city: { $regex: new RegExp(`^${escapeRegex(city.trim())}$`, 'i') },
+        state: { $regex: new RegExp(`^${escapeRegex(state.trim())}$`, 'i') },
+        country: { $regex: new RegExp(`^${escapeRegex(country.trim())}$`, 'i') }
       });
 
       if (!areaDoc) {
@@ -129,7 +180,7 @@ export const createBooking = async (req, res) => {
     }
 
     if (!areaDoc) {
-      throw new Error("Location details incomplete. Please provide Country, State, and City if entering Area manually.");
+      throw ApiError.badRequest("Location details incomplete. Please provide Country, State, and City if entering Area manually.");
     }
 
     const actualUserId = req.user.userId || req.user._id || req.user.id;
@@ -178,26 +229,16 @@ export const createBooking = async (req, res) => {
       }
     };
 
-    let booking;
-    try {
-      // Race between booking creation and timeout
-      const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('Database operation timeout after 5s')), 5000);
-      });
+    // Race between booking creation and timeout. Mongoose ValidationErrors
+    // propagate to the global handler (400 with per-field errors).
+    let timer;
+    const timeoutPromise = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new ApiError(504, 'Server is taking too long to save the booking. Please try again.')), 5000);
+    });
 
-      // Execute only once to avoid unhandled rejections or ghost creates
-      const bookingPromise = Booking.create(bookingData);
-      booking = await Promise.race([bookingPromise, timeoutPromise]);
-    } catch (creationError) {
-      console.error('🚨 Mongoose creation failed:', creationError.message);
-      return res.status(400).json({
-        success: false,
-        message: 'Debug Intercept: ' + creationError.message,
-        actualUserId: typeof actualUserId === 'undefined' ? 'UNDEFINED' : actualUserId,
-        bookingDataKeys: Object.keys(bookingData),
-        userIdInBookingData: typeof bookingData.userId === 'undefined' ? 'UNDEFINED' : bookingData.userId
-      });
-    }
+    // Execute only once to avoid unhandled rejections or ghost creates
+    const bookingPromise = Booking.create(bookingData);
+    const booking = await Promise.race([bookingPromise, timeoutPromise]).finally(() => clearTimeout(timer));
 
     // Update user stats (optional, catch error to not fail booking)
     User.findByIdAndUpdate(req.user._id, {
@@ -236,28 +277,17 @@ export const createBooking = async (req, res) => {
     return res.status(201).json(response);
 
   } catch (error) {
-    console.error('💥 [ERROR] Create booking failed:', error);
-    console.error('Error name:', error.name);
-    console.error('Error message:', error.message);
-
-    logger.errorWithContext(
-      { userId: req.user.userId || req.user._id || req.user.id },
-      'Create booking error',
-      error
-    );
-
-    // Check if headers already sent
-    if (res.headersSent) {
-      console.error('⚠️ Headers already sent, cannot send error response');
-      return;
+    // Expected client errors (ApiError) are already logged by the request
+    // logger; anything else is unexpected and worth the context.
+    if (!error.isOperational) {
+      logger.errorWithContext(
+        { userId: requesterId(req) },
+        'Create booking error',
+        error
+      );
     }
-
-    return res.status(error.message?.includes('timeout') ? 504 : 400).json({
-      success: false,
-      message: error.message || 'Failed to create booking',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
-  } finally {
+    // The global error handler picks the status and message.
+    throw error;
   }
 };
 
@@ -265,374 +295,308 @@ export const createBooking = async (req, res) => {
 // @route   GET /api/bookings/:id
 // @access  Private
 export const getBooking = async (req, res) => {
-  try {
-    const booking = await Booking.findById(req.params.id)
-      .populate('userId', 'name email phone avatar')
-      .populate('assignedTo.technicianId', 'name phone avatar rating')
-      .populate('serviceId')
-      .populate('location.area')
-      .lean();
+  const booking = await Booking.findById(req.params.id)
+    .populate('userId', 'name email phone avatar')
+    .populate('assignedTo.technicianId', 'name phone avatar rating')
+    .populate('serviceId')
+    .populate('location.area')
+    .lean();
 
-    if (!booking) {
-      return res.status(404).json({
-        success: false,
-        message: 'Booking not found'
-      });
-    }
-
-    // Format location if populated
-    if (booking.location) {
-      let areaObj = null;
-
-      if (booking.location.area) {
-        if (typeof booking.location.area === 'object') {
-          areaObj = {
-            _id: booking.location.area._id,
-            area: booking.location.area.areaName || booking.location.area.name || "",
-            areaName: booking.location.area.areaName || booking.location.area.name || "",
-            city: booking.location.area.city || "",
-            state: booking.location.area.state || "",
-            country: booking.location.area.country || "",
-            pincode: booking.location.area.pincode || ""
-          };
-        }
-      }
-
-      booking.location = {
-        area: areaObj || booking.location.area,
-        address: booking.location.completeAddress || booking.location.address || "",
-        completeAddress: booking.location.completeAddress || booking.location.address || "",
-        pincode: booking.location.pincode || (areaObj ? areaObj.pincode : ""),
-        landmark: booking.location.landmark || "",
-        coordinates: booking.location.coordinates || null
-      };
-    }
-
-    // Authorization check
-    const requestUserId = (req.user.userId || req.user._id || req.user.id).toString();
-    if (booking.userId._id.toString() !== requestUserId &&
-      req.user.role !== 'admin' &&
-      req.user.role !== 'technician') { // Add technician check logically later if needed
-      return res.status(403).json({
-        success: false,
-        message: 'Not authorized to view this booking'
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      booking
-    });
-  } catch (error) {
-    logger.errorWithContext(
-      { bookingId: req.params.id, userId: req.user._id },
-      'Get booking error',
-      error
-    );
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
+  if (!booking) {
+    throw ApiError.notFound('Booking not found');
   }
+
+  // Format location if populated
+  if (booking.location) {
+    let areaObj = null;
+
+    if (booking.location.area) {
+      if (typeof booking.location.area === 'object') {
+        areaObj = {
+          _id: booking.location.area._id,
+          area: booking.location.area.areaName || booking.location.area.name || "",
+          areaName: booking.location.area.areaName || booking.location.area.name || "",
+          city: booking.location.area.city || "",
+          state: booking.location.area.state || "",
+          country: booking.location.area.country || "",
+          pincode: booking.location.area.pincode || ""
+        };
+      }
+    }
+
+    booking.location = {
+      area: areaObj || booking.location.area,
+      address: booking.location.completeAddress || booking.location.address || "",
+      completeAddress: booking.location.completeAddress || booking.location.address || "",
+      pincode: booking.location.pincode || (areaObj ? areaObj.pincode : ""),
+      landmark: booking.location.landmark || "",
+      coordinates: booking.location.coordinates || null
+    };
+  }
+
+  // Authorization check (the owner may have been deleted, so userId can be null)
+  const ownerId = String(booking.userId?._id || booking.userId || '');
+  if (ownerId !== requesterId(req) &&
+    req.user.role !== 'admin' &&
+    req.user.role !== 'technician') { // Add technician check logically later if needed
+    throw ApiError.forbidden('You can only view your own bookings');
+  }
+
+  res.status(200).json({
+    success: true,
+    booking
+  });
 };
+
+// Customers may not cancel once the job has started/finished (409), and not in
+// the last hour before the slot (400). Mirrors Booking.cancelBlockReason().
+const CUSTOMER_CANCELLABLE = ['PENDING', 'CONFIRMED', 'ASSIGNED', 'ACCEPTED', 'RESCHEDULED'];
 
 // @desc    Cancel booking
 // @route   PUT /api/bookings/:id/cancel
 // @access  Private
 export const cancelBooking = async (req, res) => {
-  try {
-    const { reason } = req.body || {};
-    const booking = await Booking.findById(req.params.id);
+  const { reason } = req.body || {};
+  const booking = await Booking.findById(req.params.id);
 
-    if (!booking) {
-      return res.status(404).json({
-        success: false,
-        message: 'Booking not found'
-      });
+  if (!booking) {
+    throw ApiError.notFound('Booking not found');
+  }
+
+  // Authorization
+  if (booking.userId?.toString() !== requesterId(req) && req.user.role !== 'admin') {
+    throw ApiError.forbidden('You can only cancel your own bookings');
+  }
+
+  // Business logic check
+  const blocked = booking.cancelBlockReason();
+  if (blocked) {
+    const status = String(booking.status || '').toUpperCase();
+    // Already cancelled / started / completed: the booking's state forbids it.
+    if (!CUSTOMER_CANCELLABLE.includes(status)) throw ApiError.conflict(blocked);
+    // Otherwise it's the "less than 1 hour before the slot" window.
+    throw ApiError.badRequest(blocked);
+  }
+
+  const cancelledBy = req.user.role === 'admin' ? 'admin' : 'user';
+  const feeWasCharged = booking.serviceFee?.status === 'charged';
+  await booking.cancelBooking(typeof reason === 'string' ? reason.trim().slice(0, 300) : undefined, cancelledBy);
+
+  // Notifications are best-effort: the booking IS cancelled at this point, so
+  // a notification failure must not turn this into an error for the customer.
+  const notify = async (userId, data) => {
+    try {
+      await sendNotification(userId, data);
+    } catch (err) {
+      logger.warn({ err: err.message, bookingId: booking.bookingId }, 'Cancellation notification failed');
     }
+  };
 
-    // Authorization
-    const requestUserId = (req.user.userId || req.user._id || req.user.id).toString();
-    if (booking.userId.toString() !== requestUserId && req.user.role !== 'admin') {
-      return res.status(403).json({
-        success: false,
-        message: 'Not authorized to cancel this booking'
-      });
-    }
+  await notify(booking.userId, {
+    title: 'Booking Cancelled',
+    message: `Booking #${booking.bookingId} has been cancelled.`,
+    type: 'booking',
+    data: { bookingId: booking._id }
+  });
 
-    // Business logic check
-    const blocked = booking.cancelBlockReason();
-    if (blocked) {
-      return res.status(400).json({ success: false, message: blocked });
-    }
-
-    const cancelledBy = req.user.role === 'admin' ? 'admin' : 'user';
-    const feeWasCharged = booking.serviceFee?.status === 'charged';
-    await booking.cancelBooking(typeof reason === 'string' ? reason.trim().slice(0, 300) : undefined, cancelledBy);
-
-    // Notifications are best-effort: the booking IS cancelled at this point, so
-    // a notification failure must not turn this into an error for the customer.
-    const notify = async (userId, data) => {
-      try {
-        await sendNotification(userId, data);
-      } catch (err) {
-        logger.warn({ err: err.message, bookingId: booking.bookingId }, 'Cancellation notification failed');
-      }
-    };
-
-    await notify(booking.userId, {
-      title: 'Booking Cancelled',
-      message: `Booking #${booking.bookingId} has been cancelled.`,
-      type: 'booking',
+  if (booking.assignedTo?.technicianId) {
+    await notify(booking.assignedTo.technicianId, {
+      title: 'Job Cancelled',
+      message: `Job #${booking.bookingId} was cancelled by the ${cancelledBy === 'admin' ? 'admin' : 'customer'}.` +
+        (feeWasCharged ? ` Your ₹${booking.serviceFee.amount} service fee has been refunded to your balance.` : ''),
+      type: 'assignment',
       data: { bookingId: booking._id }
     });
-
-    if (booking.assignedTo?.technicianId) {
-      await notify(booking.assignedTo.technicianId, {
-        title: 'Job Cancelled',
-        message: `Job #${booking.bookingId} was cancelled by the ${cancelledBy === 'admin' ? 'admin' : 'customer'}.` +
-          (feeWasCharged ? ` Your ₹${booking.serviceFee.amount} service fee has been refunded to your balance.` : ''),
-        type: 'assignment',
-        data: { bookingId: booking._id }
-      });
-    }
-
-    // Emit socket update
-    emitBookingUpdate(booking._id, { status: 'CANCELLED', cancelledBy });
-
-    logger.audit('booking_cancelled', req.user, `booking:${booking._id}`, { reason });
-
-    res.status(200).json({
-      success: true,
-      message: 'Booking cancelled successfully',
-      booking
-    });
-
-  } catch (error) {
-    logger.errorWithContext(
-      { bookingId: req.params.id, userId: req.user.userId || req.user._id || req.user.id },
-      'Cancel booking error',
-      error
-    );
-    res.status(500).json({
-      success: false,
-      message: error.message || 'Server error'
-    });
   }
+
+  // Emit socket update
+  emitBookingUpdate(booking._id, { status: 'CANCELLED', cancelledBy });
+
+  logger.audit('booking_cancelled', req.user, `booking:${booking._id}`, { reason });
+
+  res.status(200).json({
+    success: true,
+    message: 'Booking cancelled successfully',
+    booking
+  });
 };
 
 // @desc    Reschedule booking
 // @route   PUT /api/bookings/:id/reschedule
 // @access  Private
 export const rescheduleBooking = async (req, res) => {
-  try {
-    const { date, timeSlot } = req.body;
-    const booking = await Booking.findById(req.params.id);
+  const { date, timeSlot } = req.body;
+  const booking = await Booking.findById(req.params.id);
 
-    if (!booking) {
-      return res.status(404).json({
-        success: false,
-        message: 'Booking not found'
-      });
-    }
+  if (!booking) {
+    throw ApiError.notFound('Booking not found');
+  }
 
-    const requestUserId = (req.user.userId || req.user._id || req.user.id).toString();
-    if (booking.userId.toString() !== requestUserId) {
-      return res.status(403).json({
-        success: false,
-        message: 'Not authorized'
-      });
-    }
+  if (booking.userId?.toString() !== requesterId(req)) {
+    throw ApiError.forbidden('You can only reschedule your own bookings');
+  }
 
-    // Validate new slot
-    const slotValidation = await validateTimeSlot(date, timeSlot);
-    if (!slotValidation.valid) {
-      return res.status(400).json({
-        success: false,
-        message: slotValidation.reason
-      });
-    }
+  // Same rules as Booking.canReschedule(), each with its own answer.
+  if (!['pending', 'confirmed'].includes(booking.status)) {
+    throw ApiError.conflict('Only pending or confirmed bookings can be rescheduled');
+  }
+  if ((booking.schedule?.rescheduledCount || 0) >= 2) {
+    throw ApiError.conflict('This booking has already been rescheduled the maximum number of times (2)');
+  }
+  if (!booking.canReschedule()) {
+    throw ApiError.badRequest('Bookings can only be rescheduled more than 2 hours before the scheduled time');
+  }
 
-    await booking.rescheduleBooking(new Date(date), timeSlot);
+  // Validate new slot: in the past -> 400, full -> 409
+  const slotValidation = await validateTimeSlot(date, timeSlot);
+  if (!slotValidation.valid) {
+    throw slotError(slotValidation);
+  }
+  await assertSlotHasRoom(date, timeSlot, booking._id);
 
-    // Notify
-    await sendNotification(booking.userId, {
-      title: 'Booking Rescheduled',
-      message: `Booking #${booking.bookingId} rescheduled to ${date} at ${timeSlot}.`,
-      type: 'BOOKING_RESCHEDULED',
+  await booking.rescheduleBooking(new Date(date), timeSlot);
+
+  // Notifications are best-effort: the booking IS rescheduled at this point.
+  const notify = (userId, data) =>
+    sendNotification(userId, data).catch(err =>
+      logger.warn({ err: err.message, bookingId: booking.bookingId }, 'Reschedule notification failed'));
+
+  await notify(booking.userId, {
+    title: 'Booking Rescheduled',
+    message: `Booking #${booking.bookingId} rescheduled to ${date} at ${timeSlot}.`,
+    type: 'BOOKING_RESCHEDULED',
+    relatedId: booking._id
+  });
+
+  if (booking.assignedTo?.technicianId) {
+    await notify(booking.assignedTo.technicianId, {
+      title: 'Job Rescheduled',
+      message: `Job #${booking.bookingId} has been rescheduled to ${date} ${timeSlot}.`,
+      type: 'JOB_RESCHEDULED',
       relatedId: booking._id
     });
-
-    if (booking.assignedTo?.technicianId) {
-      await sendNotification(booking.assignedTo.technicianId, {
-        title: 'Job Rescheduled',
-        message: `Job #${booking.bookingId} has been rescheduled to ${date} ${timeSlot}.`,
-        type: 'JOB_RESCHEDULED',
-        relatedId: booking._id
-      });
-    }
-
-    emitBookingUpdate(booking._id, {
-      status: 'rescheduled',
-      schedule: booking.schedule
-    });
-
-    logger.audit('booking_rescheduled', req.user, `booking:${booking._id}`);
-
-    res.status(200).json({
-      success: true,
-      message: 'Booking rescheduled successfully',
-      booking
-    });
-
-  } catch (error) {
-    logger.errorWithContext(
-      { bookingId: req.params.id, userId: req.user.userId || req.user._id || req.user.id },
-      'Reschedule booking error',
-      error
-    );
-    res.status(400).json({
-      success: false,
-      message: error.message || 'Failed to reschedule'
-    });
   }
+
+  emitBookingUpdate(booking._id, {
+    status: 'rescheduled',
+    schedule: booking.schedule
+  });
+
+  logger.audit('booking_rescheduled', req.user, `booking:${booking._id}`);
+
+  res.status(200).json({
+    success: true,
+    message: 'Booking rescheduled successfully',
+    booking
+  });
 };
 
 // @desc    Rate booking
 // @route   POST /api/bookings/:id/rate
 // @access  Private
 export const rateBooking = async (req, res) => {
-  try {
-    const { rating, review } = req.body;
-    const booking = await Booking.findById(req.params.id);
+  const { rating, review } = req.body;
+  const booking = await Booking.findById(req.params.id);
 
-    if (!booking) {
-      return res.status(404).json({
-        success: false,
-        message: 'Booking not found'
-      });
-    }
-
-    if (booking.status !== 'completed') {
-      return res.status(400).json({
-        success: false,
-        message: 'Can only rate completed bookings'
-      });
-    }
-
-    booking.rating = {
-      stars: rating,
-      review,
-      submittedAt: new Date()
-    };
-
-    await booking.save();
-
-    // Update technician stats if assigned
-    if (booking.assignedTo?.technicianId) {
-      const technician = await User.findById(booking.assignedTo.technicianId);
-      if (technician) {
-        // Simple moving average or similar logic could be implemented here
-        // For now, just logging or updating if we had a proper stats model
-        // await technician.updateRating(rating);
-      }
-    }
-
-    logger.audit('booking_rated', req.user, `booking:${booking._id}`, { rating });
-
-    res.status(200).json({
-      success: true,
-      message: 'Rating submitted successfully',
-      booking
-    });
-
-  } catch (error) {
-    logger.errorWithContext(
-      { bookingId: req.params.id, userId: req.user.userId || req.user._id || req.user.id },
-      'Rate booking error',
-      error
-    );
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
+  if (!booking) {
+    throw ApiError.notFound('Booking not found');
   }
+
+  if (booking.userId?.toString() !== requesterId(req) && req.user.role !== 'admin') {
+    throw ApiError.forbidden('You can only review your own bookings');
+  }
+
+  // Status casing varies ('completed' / 'COMPLETED').
+  if (String(booking.status || '').toLowerCase() !== 'completed') {
+    throw ApiError.conflict('You can only rate a booking after it has been completed');
+  }
+
+  booking.rating = {
+    stars: Number(rating),
+    review: typeof review === 'string' ? review.trim() : undefined,
+    submittedAt: new Date()
+  };
+
+  // Only validate what changed — legacy bookings may predate required fields.
+  await booking.save({ validateModifiedOnly: true });
+
+  // Update technician stats if assigned
+  if (booking.assignedTo?.technicianId) {
+    const technician = await User.findById(booking.assignedTo.technicianId);
+    if (technician) {
+      // Simple moving average or similar logic could be implemented here
+      // For now, just logging or updating if we had a proper stats model
+      // await technician.updateRating(rating);
+    }
+  }
+
+  logger.audit('booking_rated', req.user, `booking:${booking._id}`, { rating });
+
+  res.status(200).json({
+    success: true,
+    message: 'Rating submitted successfully',
+    booking
+  });
 };
 
 // @desc    Get available time slots
 // @route   GET /api/bookings/available-slots
 // @access  Public
 export const getAvailableSlots = async (req, res) => {
-  try {
-    const { date, serviceId, country, state, city, area } = req.query;
+  const { date, serviceId, country, state, city, area } = req.query;
 
-    if (!date) {
-      return res.status(400).json({
-        success: false,
-        message: 'Date is required'
-      });
-    }
-
-    const requestedDate = new Date(date);
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    if (requestedDate < today) {
-      return res.status(400).json({
-        success: false,
-        message: 'Cannot book in the past'
-      });
-    }
-
-    // Default slots - standardized to HH:mm-HH:mm
-    const allSlots = [
-      '09:00-11:00',
-      '11:00-13:00',
-      '13:00-15:00',
-      '15:00-17:00',
-      '17:00-19:00'
-    ];
-
-    // Find bookings for that date/location/service
-    const startOfDay = new Date(date);
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(date);
-    endOfDay.setHours(23, 59, 59, 999);
-
-    const bookings = await Booking.find({
-      'schedule.preferredDate': { $gte: startOfDay, $lte: endOfDay },
-      status: { $in: ['confirmed', 'assigned', 'in_progress'] }
-    }).lean();
-
-    const bookedCounts = {};
-    bookings.forEach(b => {
-      const slot = b.schedule.timeSlot;
-      bookedCounts[slot] = (bookedCounts[slot] || 0) + 1;
-    });
-
-    const MAX_PER_SLOT = 5; // simplified capacity
-
-    const availableSlots = allSlots.filter(slot => {
-      // Logic could be expanded to check technician availability
-      return (bookedCounts[slot] || 0) < MAX_PER_SLOT;
-    });
-
-    res.status(200).json({
-      success: true,
-      data: {
-        date,
-        availableSlots,
-        bookedSlots: allSlots.filter(s => !availableSlots.includes(s))
-      }
-    });
-
-  } catch (error) {
-    console.error('Error fetching slots:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to fetch slots'
-    });
+  if (!date) {
+    throw ApiError.badRequest('Date is required');
   }
+
+  const requestedDate = new Date(date);
+  if (Number.isNaN(requestedDate.getTime())) {
+    throw ApiError.badRequest('Date must be a valid date (YYYY-MM-DD)');
+  }
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  if (requestedDate < today) {
+    throw ApiError.badRequest('Cannot book a date in the past');
+  }
+
+  // Default slots - standardized to HH:mm-HH:mm
+  const allSlots = [
+    '09:00-11:00',
+    '11:00-13:00',
+    '13:00-15:00',
+    '15:00-17:00',
+    '17:00-19:00'
+  ];
+
+  // Find bookings for that date/location/service
+  const { startOfDay, endOfDay } = dayBounds(date);
+
+  const bookings = await Booking.find({
+    'schedule.preferredDate': { $gte: startOfDay, $lte: endOfDay },
+    status: { $in: SLOT_OCCUPYING_STATUSES }
+  }).lean();
+
+  const bookedCounts = {};
+  bookings.forEach(b => {
+    const slot = b.schedule?.timeSlot;
+    bookedCounts[slot] = (bookedCounts[slot] || 0) + 1;
+  });
+
+  const availableSlots = allSlots.filter(slot => {
+    // Logic could be expanded to check technician availability
+    return (bookedCounts[slot] || 0) < MAX_PER_SLOT;
+  });
+
+  res.status(200).json({
+    success: true,
+    data: {
+      date,
+      availableSlots,
+      bookedSlots: allSlots.filter(s => !availableSlots.includes(s))
+    }
+  });
 };
 
 export const getBookingAnalytics = async (req, res) => {
@@ -643,38 +607,42 @@ export const getBookingAnalytics = async (req, res) => {
 // @route   PUT /api/bookings/:id/assign
 // @access  Private/Admin
 export const assignEmployee = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { employeeId } = req.body;
+  const { id } = req.params;
+  const { employeeId } = req.body;
 
-    const booking = await Booking.findById(id);
-    if (!booking) {
-      return res.status(404).json({ success: false, error: 'Booking not found' });
-    }
-
-    const employee = await User.findById(employeeId);
-    if (!employee) {
-      return res.status(404).json({ success: false, error: 'Employee not found' });
-    }
-
-    booking.assignedTo = {
-      technicianId: employee._id,
-      name: employee.name,
-      phone: employee.phone,
-      avatar: employee.avatar,
-      assignedAt: new Date()
-    };
-    booking.status = 'assigned';
-
-    await booking.save();
-
-    res.json({
-      success: true,
-      message: 'Assignment successful',
-      booking
-    });
-  } catch (error) {
-    console.error('Assignment error:', error);
-    res.status(500).json({ error: error.message });
+  if (!employeeId) {
+    throw ApiError.badRequest('Employee ID is required');
   }
+
+  const booking = await Booking.findById(id);
+  if (!booking) {
+    throw ApiError.notFound('Booking not found');
+  }
+
+  const status = String(booking.status || '').toUpperCase();
+  if (status === 'COMPLETED' || status === 'CANCELLED' || status === 'CANCELED') {
+    throw ApiError.conflict(`Cannot assign an employee to a ${status === 'COMPLETED' ? 'completed' : 'cancelled'} booking`);
+  }
+
+  const employee = await User.findById(employeeId);
+  if (!employee) {
+    throw ApiError.notFound('Employee not found');
+  }
+
+  booking.assignedTo = {
+    technicianId: employee._id,
+    name: employee.name,
+    phone: employee.phone,
+    avatar: employee.avatar,
+    assignedAt: new Date()
+  };
+  booking.status = 'assigned';
+
+  await booking.save();
+
+  res.json({
+    success: true,
+    message: 'Assignment successful',
+    booking
+  });
 };

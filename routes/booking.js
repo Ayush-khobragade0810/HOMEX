@@ -20,8 +20,8 @@ import {
   // assignBooking // Use assignEmployee from bookingController which might wrap or be the one
 } from "../controllers/adminBooking.controller.js";
 
-import { validateRequest } from "../middleware/validate.js";
-import { bookingSchemas } from "../utils/validationSchemas.js";
+import { validate, validateObjectId } from "../middleware/validate.js";
+import { bookingSchemas } from "../validators/booking.js";
 import { adminAuth, userAuth } from "../middleware/authMiddleware.js";
 import Service from "../models/Service.js";
 import Booking from "../models/Booking.js";
@@ -32,22 +32,18 @@ const router = express.Router();
 // ======================================
 // PUBLIC ROUTES
 // ======================================
-router.get("/available-slots", getAvailableSlots);
+router.get("/available-slots", validate({ query: bookingSchemas.availableSlotsQuery }), getAvailableSlots);
 
-router.post("/test-booking", async (req, res) => {
+router.post("/test-booking", (req, res) => {
   // Keeping test endpoint
-  try {
-    res.json({ success: true, message: "Test endpoint working" });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  res.json({ success: true, message: "Test endpoint working" });
 });
 
 // ======================================
 // USER ROUTES
 // ======================================
-router.get("/user/bookings", userAuth, async (req, res) => {
-  // Inline implementation for "my bookings" was present. 
+router.get("/user/bookings", userAuth, async (req, res, next) => {
+  // Inline implementation for "my bookings" was present.
   // Ideally this should be in a controller, but preserving existing inline logic if it was unique and not in controller.
   // Actually, getUserBookings from adminBooking.controller is for ADMIN viewing a user.
   // The user's own bookings helper might be missing.
@@ -92,40 +88,47 @@ router.get("/user/bookings", userAuth, async (req, res) => {
     });
 
     res.json({ success: true, bookings });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    // Global handler logs it and responds 500 without leaking internals.
+    next(e);
+  }
 });
 
-router.post("/user/create", userAuth, createBooking);
-// Note: original pointed to an inline handler that did checks. 
+router.post("/user/create", userAuth, validate({ body: bookingSchemas.createBooking }), createBooking);
+// Note: original pointed to an inline handler that did checks.
 // createBooking in controller does checks too. I'll point to controller.
 
-router.get("/user/:id", userAuth, getBookingById);
-router.put("/user/:id", userAuth, updateUserBooking);
+router.get("/user/:id", userAuth, validateObjectId("id"), getBookingById);
+router.put("/user/:id", userAuth, validateObjectId("id"), validate({ body: bookingSchemas.reschedule }), updateUserBooking);
 // Customer (or admin) cancels a booking. The dashboard calls PATCH; PUT kept
 // for older clients. The controller checks ownership and the cancel window.
-router.patch("/:id/cancel", userAuth, cancelBooking);
-router.put("/:id/cancel", userAuth, cancelBooking);
+router.patch("/:id/cancel", userAuth, validateObjectId("id"), validate({ body: bookingSchemas.cancel }), cancelBooking);
+router.put("/:id/cancel", userAuth, validateObjectId("id"), validate({ body: bookingSchemas.cancel }), cancelBooking);
 
 // ======================================
 // GENERAL / ADMIN ROUTES
 // ======================================
-router.post("/", userAuth, validateRequest(bookingSchemas.createBooking), createBooking);
-router.get("/", adminAuth, getAllBookings);
-router.get("/user/:userId", adminAuth, getUserBookings); // Admin viewing specific user
+router.post("/", userAuth, validate({ body: bookingSchemas.createBooking }), createBooking);
+router.get("/", adminAuth, validate({ query: bookingSchemas.listQuery }), getAllBookings);
+// NOTE: unreachable — GET "/user/:id" above matches first.
+router.get("/user/:userId", adminAuth, validateObjectId("userId"), getUserBookings); // Admin viewing specific user
 // Customer-facing invoice. Declared before "/:id" for clarity. The controller
-// enforces that the requester owns the booking (or is an admin).
+// enforces that the requester owns the booking (or is an admin). Accepts the
+// Mongo _id or the human bookingId, so no ObjectId check here.
 router.get("/:id/invoice", userAuth, generateUserInvoice);
 
-router.get("/:id", getBookingById); // mixed auth handled in controller
-router.put("/:id/status", adminAuth, updateBookingStatus);
-router.put("/:id", adminAuth, updateBooking);
-router.delete("/:id", adminAuth, deleteBooking);
-router.post("/:id/review", userAuth, addBookingReview);
+// Owner / admin / technician access is checked in the controller, which needs
+// req.user — without auth this route crashed with a 500.
+router.get("/:id", userAuth, validateObjectId("id"), getBookingById);
+router.put("/:id/status", adminAuth, validateObjectId("id"), validate({ body: bookingSchemas.updateStatus }), updateBookingStatus);
+router.put("/:id", adminAuth, validateObjectId("id"), validate({ body: bookingSchemas.adminUpdate }), updateBooking);
+router.delete("/:id", adminAuth, validateObjectId("id"), deleteBooking);
+router.post("/:id/review", userAuth, validateObjectId("id"), validate({ body: bookingSchemas.review }), addBookingReview);
 
 // ======================================
 // SPECIFIC ACTION ROUTES
 // ======================================
-router.put("/:id/assign", adminAuth, assignEmployee); // The requested route
+router.put("/:id/assign", adminAuth, validateObjectId("id"), validate({ body: bookingSchemas.assign }), assignEmployee); // The requested route
 
 // ======================================
 // ANALYTICS

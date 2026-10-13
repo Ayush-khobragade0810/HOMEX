@@ -17,6 +17,8 @@ import {
     debugUsers
 } from '../../controllers/adminController.js';
 import { protect, authorize } from '../../middleware/authMiddleware.js';
+import { validate, validateObjectId } from '../../middleware/validate.js';
+import { bookingSchemas } from '../../validators/booking.js';
 
 const router = express.Router();
 
@@ -37,21 +39,24 @@ router.get('/check', (req, res) => {
 });
 
 router.route('/bookings')
-    .get(getAllBookings);
+    .get(validate({ query: bookingSchemas.listQuery }), getAllBookings);
+
+// Every /bookings/:id route below looks the booking up by its Mongo _id.
+const bookingId = validateObjectId('id');
 
 router.route('/bookings/:id')
-    .get(getBookingById)
-    .put(updateBooking)
-    .delete(deleteBooking);
+    .get(bookingId, getBookingById)
+    .put(bookingId, validate({ body: bookingSchemas.adminUpdate }), updateBooking)
+    .delete(bookingId, deleteBooking);
 
 router.route('/bookings/:id/status')
-    .put(updateBookingStatus);
+    .put(bookingId, validate({ body: bookingSchemas.updateStatus }), updateBookingStatus);
 
 router.route('/bookings/:id/assign')
-    .put(assignBooking);
+    .put(bookingId, validate({ body: bookingSchemas.assign }), assignBooking);
 
 router.route('/bookings/:id/invoice')
-    .get(generateInvoice);
+    .get(bookingId, generateInvoice);
 
 router.route('/stats')
     .get(getDashboardStats);
